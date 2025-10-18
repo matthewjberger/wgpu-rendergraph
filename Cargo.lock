@@ -166,6 +166,7 @@ dependencies = [
  "egui-winit",
  "env_logger",
  "futures",
+ "image",
  "kira",
  "log",
  "nalgebra-glm",

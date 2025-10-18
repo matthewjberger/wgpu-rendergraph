@@ -693,6 +693,7 @@ struct TextureAtlas {
     sampler: wgpu::Sampler,
     width: u32,
     height: u32,
+    current_y: u32,
     regions: Vec<TextureRegion>,
 }
 
@@ -738,6 +739,7 @@ impl TextureAtlas {
             sampler,
             width,
             height,
+            current_y: 0,
             regions: Vec::new(),
         }
     }
@@ -750,9 +752,8 @@ impl TextureAtlas {
         texture_height: u32,
     ) -> usize {
         let region_index = self.regions.len();
-        let current_offset_y = self.regions.len() as u32 * texture_height;
 
-        if current_offset_y + texture_height > self.height {
+        if self.current_y + texture_height > self.height {
             panic!("Texture atlas is full");
         }
 
@@ -762,7 +763,7 @@ impl TextureAtlas {
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: 0,
-                    y: current_offset_y,
+                    y: self.current_y,
                     z: 0,
                 },
                 aspect: wgpu::TextureAspect::All,
@@ -782,8 +783,8 @@ impl TextureAtlas {
 
         let min_u = 0.0;
         let max_u = texture_width as f32 / self.width as f32;
-        let min_v = current_offset_y as f32 / self.height as f32;
-        let max_v = (current_offset_y + texture_height) as f32 / self.height as f32;
+        let min_v = self.current_y as f32 / self.height as f32;
+        let max_v = (self.current_y + texture_height) as f32 / self.height as f32;
 
         self.regions.push(TextureRegion {
             min_u,
@@ -791,6 +792,8 @@ impl TextureAtlas {
             max_u,
             max_v,
         });
+
+        self.current_y += texture_height;
 
         region_index
     }
@@ -828,7 +831,27 @@ impl Scene {
         );
         let uniform = UniformBinding::new(device);
 
-        let mut texture_atlas = TextureAtlas::new(device, 512, 512);
+        let mut texture_atlas = TextureAtlas::new(device, 512, 1024);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let awesomeface_data = {
+            let img = image::open("assets/images/awesomeface.png")
+                .expect("Failed to load awesomeface.png")
+                .to_rgba8();
+            let dimensions = img.dimensions();
+            (img.into_raw(), dimensions.0, dimensions.1)
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let awesomeface_data = {
+            let img = image::load_from_memory(include_bytes!("../assets/images/awesomeface.png"))
+                .expect("Failed to load awesomeface.png from memory")
+                .to_rgba8();
+            let dimensions = img.dimensions();
+            (img.into_raw(), dimensions.0, dimensions.1)
+        };
+
+        texture_atlas.add_texture(queue, &awesomeface_data.0, awesomeface_data.1, awesomeface_data.2);
 
         let checkerboard = Self::create_checkerboard_texture(8);
         texture_atlas.add_texture(queue, &checkerboard, 8, 8);
@@ -1148,13 +1171,7 @@ impl UniformBinding {
     }
 }
 
-const VERTICES: [Vertex; 9] = [
-    Vertex {
-        position: [-0.5, -1.0, 0.0, 1.0],
-        texture_coordinates: [1.0, 1.0],
-        texture_index: 0,
-        padding: 0,
-    },
+const VERTICES: [Vertex; 10] = [
     Vertex {
         position: [-1.5, -1.0, 0.0, 1.0],
         texture_coordinates: [0.0, 1.0],
@@ -1162,50 +1179,62 @@ const VERTICES: [Vertex; 9] = [
         padding: 0,
     },
     Vertex {
-        position: [-1.0, 0.0, 0.0, 1.0],
-        texture_coordinates: [0.5, 0.0],
+        position: [-0.5, -1.0, 0.0, 1.0],
+        texture_coordinates: [1.0, 1.0],
+        texture_index: 0,
+        padding: 0,
+    },
+    Vertex {
+        position: [-0.5, 0.0, 0.0, 1.0],
+        texture_coordinates: [1.0, 0.0],
+        texture_index: 0,
+        padding: 0,
+    },
+    Vertex {
+        position: [-1.5, 0.0, 0.0, 1.0],
+        texture_coordinates: [0.0, 0.0],
         texture_index: 0,
         padding: 0,
     },
     Vertex {
         position: [0.5, -1.0, 0.0, 1.0],
         texture_coordinates: [1.0, 1.0],
-        texture_index: 1,
+        texture_index: 2,
         padding: 0,
     },
     Vertex {
         position: [-0.5, -1.0, 0.0, 1.0],
         texture_coordinates: [0.0, 1.0],
-        texture_index: 1,
+        texture_index: 2,
         padding: 0,
     },
     Vertex {
         position: [0.0, 0.0, 0.0, 1.0],
         texture_coordinates: [0.5, 0.0],
-        texture_index: 1,
+        texture_index: 2,
         padding: 0,
     },
     Vertex {
         position: [1.5, -1.0, 0.0, 1.0],
         texture_coordinates: [1.0, 1.0],
-        texture_index: 2,
+        texture_index: 3,
         padding: 0,
     },
     Vertex {
         position: [0.5, -1.0, 0.0, 1.0],
         texture_coordinates: [0.0, 1.0],
-        texture_index: 2,
+        texture_index: 3,
         padding: 0,
     },
     Vertex {
         position: [1.0, 0.0, 0.0, 1.0],
         texture_coordinates: [0.5, 0.0],
-        texture_index: 2,
+        texture_index: 3,
         padding: 0,
     },
 ];
 
-const INDICES: [u32; 9] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+const INDICES: [u32; 12] = [0, 1, 2, 0, 2, 3, 4, 5, 6, 7, 8, 9];
 
 const SHADER_SOURCE: &str = "
 struct Uniform {
