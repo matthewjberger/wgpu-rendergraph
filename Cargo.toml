@@ -1,0 +1,41 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+name = "app_core"
+
+[dependencies]
+bytemuck = { version = "1.24.0", features = ["derive"] }
+egui = "0.32.3"
+egui-wgpu = { version = "0.32.3", features = ["winit"] }
+futures = "0.3.31"
+log = "0.4.28"
+nalgebra-glm = { version = "0.20.0", features = [
+    "convert-bytemuck",
+    "serde-serialize",
+] }
+web-time = "1.1.0"
+wgpu = { version = "25.0.2", default-features = false }
+winit = "0.30.12"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11.8"
+egui-winit = "0.32.3"
+pollster = "0.4.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+console_log = "1.0.0"
+egui-winit = { version = "0.32.3", default-features = false }
+wasm-bindgen = "0.2.104"
+wasm-bindgen-futures = "0.4.54"
+
+[features]
+default = ["wgpu/default"]
+webgl = ["wgpu/webgl"]
+webgpu = ["wgpu/webgpu"]
