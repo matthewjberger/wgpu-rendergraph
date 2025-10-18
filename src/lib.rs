@@ -561,12 +561,124 @@ impl Gpu {
     }
 }
 
+struct TextureAtlas {
+    texture: wgpu::Texture,
+    texture_view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    width: u32,
+    height: u32,
+    regions: Vec<TextureRegion>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextureRegion {
+    min_u: f32,
+    min_v: f32,
+    max_u: f32,
+    max_v: f32,
+}
+
+impl TextureAtlas {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Texture Atlas"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        Self {
+            texture,
+            texture_view,
+            sampler,
+            width,
+            height,
+            regions: Vec::new(),
+        }
+    }
+
+    pub fn add_texture(
+        &mut self,
+        queue: &wgpu::Queue,
+        texture_data: &[u8],
+        texture_width: u32,
+        texture_height: u32,
+    ) -> usize {
+        let region_index = self.regions.len();
+        let current_offset_y = self.regions.len() as u32 * texture_height;
+
+        if current_offset_y + texture_height > self.height {
+            panic!("Texture atlas is full");
+        }
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: current_offset_y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            texture_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * texture_width),
+                rows_per_image: Some(texture_height),
+            },
+            wgpu::Extent3d {
+                width: texture_width,
+                height: texture_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let min_u = 0.0;
+        let max_u = texture_width as f32 / self.width as f32;
+        let min_v = current_offset_y as f32 / self.height as f32;
+        let max_v = (current_offset_y + texture_height) as f32 / self.height as f32;
+
+        self.regions.push(TextureRegion {
+            min_u,
+            min_v,
+            max_u,
+            max_v,
+        });
+
+        region_index
+    }
+
+}
+
 struct Scene {
     pub model: nalgebra_glm::Mat4,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub uniform: UniformBinding,
+    _texture_atlas: TextureAtlas,
     pub texture_bind_group: wgpu::BindGroup,
+    _atlas_regions_buffer: wgpu::Buffer,
     pub pipeline: wgpu::RenderPipeline,
 }
 
@@ -589,12 +701,61 @@ impl Scene {
             },
         );
         let uniform = UniformBinding::new(device);
-        let (texture_bind_group, texture_bind_group_layout) = Self::create_texture_bind_group(device, queue);
+
+        let mut texture_atlas = TextureAtlas::new(device, 512, 512);
+
+        let checkerboard = Self::create_checkerboard_texture(8);
+        texture_atlas.add_texture(queue, &checkerboard, 8, 8);
+
+        let stripes = Self::create_stripes_texture(16);
+        texture_atlas.add_texture(queue, &stripes, 16, 16);
+
+        let gradient = Self::create_gradient_texture(32);
+        texture_atlas.add_texture(queue, &gradient, 32, 32);
+
+        let regions_data: Vec<[f32; 4]> = texture_atlas
+            .regions
+            .iter()
+            .map(|r| [r.min_u, r.min_v, r.max_u, r.max_v])
+            .collect();
+
+        let atlas_regions_buffer = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Atlas Regions Buffer"),
+                contents: bytemuck::cast_slice(&regions_data),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            },
+        );
+
+        let texture_bind_group_layout = Self::create_texture_bind_group_layout(device);
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Texture Atlas Bind Group"),
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_atlas.texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&texture_atlas.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: atlas_regions_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         let pipeline = Self::create_pipeline(device, surface_format, &uniform, &texture_bind_group_layout);
+
         Self {
             model: nalgebra_glm::Mat4::identity(),
             uniform,
+            _texture_atlas: texture_atlas,
             texture_bind_group,
+            _atlas_regions_buffer: atlas_regions_buffer,
             pipeline,
             vertex_buffer,
             index_buffer,
@@ -634,68 +795,48 @@ impl Scene {
         );
     }
 
-    fn create_texture_bind_group(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> (wgpu::BindGroup, wgpu::BindGroupLayout) {
-        const TEXTURE_SIZE: u32 = 8;
-
-        let mut texture_data = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
-        for y in 0..TEXTURE_SIZE {
-            for x in 0..TEXTURE_SIZE {
+    fn create_checkerboard_texture(size: u32) -> Vec<u8> {
+        let mut texture_data = Vec::with_capacity((size * size * 4) as usize);
+        for y in 0..size {
+            for x in 0..size {
                 let is_white = (x + y) % 2 == 0;
                 let color = if is_white { 255u8 } else { 0u8 };
                 texture_data.extend_from_slice(&[color, color, color, 255]);
             }
         }
+        texture_data
+    }
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Checkerboard Texture"),
-            size: wgpu::Extent3d {
-                width: TEXTURE_SIZE,
-                height: TEXTURE_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+    fn create_stripes_texture(size: u32) -> Vec<u8> {
+        let mut texture_data = Vec::with_capacity((size * size * 4) as usize);
+        for _y in 0..size {
+            for x in 0..size {
+                let is_red = x % 2 == 0;
+                let color = if is_red {
+                    [255u8, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
+                texture_data.extend_from_slice(&color);
+            }
+        }
+        texture_data
+    }
 
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &texture_data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * TEXTURE_SIZE),
-                rows_per_image: Some(TEXTURE_SIZE),
-            },
-            wgpu::Extent3d {
-                width: TEXTURE_SIZE,
-                height: TEXTURE_SIZE,
-                depth_or_array_layers: 1,
-            },
-        );
+    fn create_gradient_texture(size: u32) -> Vec<u8> {
+        let mut texture_data = Vec::with_capacity((size * size * 4) as usize);
+        for y in 0..size {
+            for x in 0..size {
+                let r = ((x as f32 / size as f32) * 255.0) as u8;
+                let g = ((y as f32 / size as f32) * 255.0) as u8;
+                texture_data.extend_from_slice(&[r, g, 0, 255]);
+            }
+        }
+        texture_data
+    }
 
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    fn create_texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Texture Bind Group Layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -714,25 +855,18 @@ impl Scene {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-            ],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Texture Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
             ],
-        });
-
-        (bind_group, bind_group_layout)
+        })
     }
 
     fn create_pipeline(
@@ -762,8 +896,8 @@ impl Scene {
                 compilation_options: Default::default(),
             },
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: Some(wgpu::IndexFormat::Uint32),
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
                 front_face: wgpu::FrontFace::Cw,
                 cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
@@ -803,11 +937,13 @@ impl Scene {
 struct Vertex {
     position: [f32; 4],
     texture_coordinates: [f32; 2],
+    texture_index: u32,
+    padding: u32,
 }
 
 impl Vertex {
     pub fn vertex_attributes() -> Vec<wgpu::VertexAttribute> {
-        wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2].to_vec()
+        wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Uint32, 3 => Uint32].to_vec()
     }
 
     pub fn description(attributes: &[wgpu::VertexAttribute]) -> wgpu::VertexBufferLayout<'_> {
@@ -886,56 +1022,116 @@ impl UniformBinding {
     }
 }
 
-const VERTICES: [Vertex; 3] = [
+const VERTICES: [Vertex; 9] = [
     Vertex {
-        position: [1.0, -1.0, 0.0, 1.0],
+        position: [-0.5, -1.0, 0.0, 1.0],
         texture_coordinates: [1.0, 1.0],
+        texture_index: 0,
+        padding: 0,
     },
     Vertex {
-        position: [-1.0, -1.0, 0.0, 1.0],
+        position: [-1.5, -1.0, 0.0, 1.0],
         texture_coordinates: [0.0, 1.0],
+        texture_index: 0,
+        padding: 0,
     },
     Vertex {
-        position: [0.0, 1.0, 0.0, 1.0],
+        position: [-1.0, 0.0, 0.0, 1.0],
         texture_coordinates: [0.5, 0.0],
+        texture_index: 0,
+        padding: 0,
+    },
+    Vertex {
+        position: [0.5, -1.0, 0.0, 1.0],
+        texture_coordinates: [1.0, 1.0],
+        texture_index: 1,
+        padding: 0,
+    },
+    Vertex {
+        position: [-0.5, -1.0, 0.0, 1.0],
+        texture_coordinates: [0.0, 1.0],
+        texture_index: 1,
+        padding: 0,
+    },
+    Vertex {
+        position: [0.0, 0.0, 0.0, 1.0],
+        texture_coordinates: [0.5, 0.0],
+        texture_index: 1,
+        padding: 0,
+    },
+    Vertex {
+        position: [1.5, -1.0, 0.0, 1.0],
+        texture_coordinates: [1.0, 1.0],
+        texture_index: 2,
+        padding: 0,
+    },
+    Vertex {
+        position: [0.5, -1.0, 0.0, 1.0],
+        texture_coordinates: [0.0, 1.0],
+        texture_index: 2,
+        padding: 0,
+    },
+    Vertex {
+        position: [1.0, 0.0, 0.0, 1.0],
+        texture_coordinates: [0.5, 0.0],
+        texture_index: 2,
+        padding: 0,
     },
 ];
 
-const INDICES: [u32; 3] = [0, 1, 2];
+const INDICES: [u32; 9] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
 const SHADER_SOURCE: &str = "
 struct Uniform {
     mvp: mat4x4<f32>,
 };
 
+struct AtlasRegion {
+    min_u: f32,
+    min_v: f32,
+    max_u: f32,
+    max_v: f32,
+};
+
 @group(0) @binding(0)
 var<uniform> ubo: Uniform;
 
 @group(1) @binding(0)
-var texture: texture_2d<f32>;
+var texture_atlas: texture_2d<f32>;
 
 @group(1) @binding(1)
 var texture_sampler: sampler;
 
+@group(1) @binding(2)
+var<storage, read> atlas_regions: array<AtlasRegion>;
+
 struct VertexInput {
     @location(0) position: vec4<f32>,
     @location(1) texture_coordinates: vec2<f32>,
+    @location(2) texture_index: u32,
 };
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) texture_coordinates: vec2<f32>,
+    @location(1) @interpolate(flat) texture_index: u32,
 };
 
 @vertex
 fn vertex_main(vert: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.texture_coordinates = vert.texture_coordinates;
+    out.texture_index = vert.texture_index;
     out.position = ubo.mvp * vert.position;
     return out;
 };
 
 @fragment
 fn fragment_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(texture, texture_sampler, in.texture_coordinates);
+    let region = atlas_regions[in.texture_index];
+    let atlas_uv = vec2<f32>(
+        mix(region.min_u, region.max_u, in.texture_coordinates.x),
+        mix(region.min_v, region.max_v, in.texture_coordinates.y)
+    );
+    return textureSample(texture_atlas, texture_sampler, atlas_uv);
 }
 ";
