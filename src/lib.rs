@@ -11,6 +11,13 @@ use winit::{
     window::{Theme, Window},
 };
 
+use kira::{
+    AudioManager,
+    AudioManagerSettings,
+    DefaultBackend,
+    sound::static_sound::StaticSoundData,
+};
+
 #[derive(Default)]
 pub struct App {
     window: Option<Arc<Window>>,
@@ -19,6 +26,7 @@ pub struct App {
     last_render_time: Option<Instant>,
     #[cfg(target_arch = "wasm32")]
     renderer_receiver: Option<futures::channel::oneshot::Receiver<Renderer>>,
+    audio_manager: Option<AudioManager>,
     last_size: (u32, u32),
 }
 
@@ -116,6 +124,19 @@ impl ApplicationHandler for App {
             });
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+                Ok(manager) => {
+                    log::info!("Audio manager initialized successfully");
+                    self.audio_manager = Some(manager);
+                }
+                Err(error) => {
+                    log::error!("Failed to initialize audio manager: {:?}", error);
+                }
+            }
+        }
+
         self.gui_state = Some(gui_state);
         self.last_render_time = Some(Instant::now());
     }
@@ -158,12 +179,117 @@ impl ApplicationHandler for App {
                 event:
                     winit::event::KeyEvent {
                         physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                        state: winit::event::ElementState::Pressed,
                         ..
                     },
                 ..
             } => {
                 if matches!(key_code, winit::keyboard::KeyCode::Escape) {
                     event_loop.exit();
+                }
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    if self.audio_manager.is_none() {
+                        log::info!("Initializing audio manager on first key press (WASM)");
+                        match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+                            Ok(manager) => {
+                                log::info!("Audio manager initialized successfully on WASM");
+                                self.audio_manager = Some(manager);
+                            }
+                            Err(error) => {
+                                log::error!("Failed to initialize audio manager on WASM: {:?}", error);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(audio_manager) = self.audio_manager.as_mut() {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let sound_result = match key_code {
+                        winit::keyboard::KeyCode::Digit1 => Some(StaticSoundData::from_file("assets/blip.ogg")),
+                        winit::keyboard::KeyCode::Digit2 => Some(StaticSoundData::from_file("assets/drums.ogg")),
+                        winit::keyboard::KeyCode::Digit3 => Some(StaticSoundData::from_file("assets/score.ogg")),
+                        winit::keyboard::KeyCode::Digit4 => Some(StaticSoundData::from_file("assets/sine.wav")),
+                        winit::keyboard::KeyCode::KeyQ => Some(StaticSoundData::from_file("assets/dynamic/arp.ogg")),
+                        winit::keyboard::KeyCode::KeyW => Some(StaticSoundData::from_file("assets/dynamic/bass.ogg")),
+                        winit::keyboard::KeyCode::KeyE => Some(StaticSoundData::from_file("assets/dynamic/drums.ogg")),
+                        winit::keyboard::KeyCode::KeyR => Some(StaticSoundData::from_file("assets/dynamic/lead.ogg")),
+                        winit::keyboard::KeyCode::KeyT => Some(StaticSoundData::from_file("assets/dynamic/pad.ogg")),
+                        _ => None,
+                    };
+
+                    #[cfg(target_arch = "wasm32")]
+                    let sound_result = match key_code {
+                        winit::keyboard::KeyCode::Digit1 => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/blip.ogg"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::Digit2 => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/drums.ogg"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::Digit3 => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/score.ogg"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::Digit4 => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/sine.wav"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::KeyQ => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/dynamic/arp.ogg"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::KeyW => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/dynamic/bass.ogg"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::KeyE => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/dynamic/drums.ogg"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::KeyR => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/dynamic/lead.ogg"))
+                            ))
+                        }
+                        winit::keyboard::KeyCode::KeyT => {
+                            Some(StaticSoundData::from_cursor(
+                                std::io::Cursor::new(include_bytes!("../assets/dynamic/pad.ogg"))
+                            ))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(result) = sound_result {
+                        log::info!("Attempting to play sound");
+                        match result {
+                            Ok(sound_data) => {
+                                log::info!("Sound data loaded successfully");
+                                match audio_manager.play(sound_data) {
+                                    Ok(_handle) => {
+                                        log::info!("Sound playback started successfully");
+                                    }
+                                    Err(error) => {
+                                        log::error!("Failed to play sound: {:?}", error);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                log::error!("Failed to load sound data: {:?}", error);
+                            }
+                        }
+                    } else {
+                        log::info!("No sound mapped to this key");
+                    }
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
