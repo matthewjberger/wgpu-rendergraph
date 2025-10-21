@@ -2,6 +2,9 @@
 use wasm_bindgen::prelude::*;
 use wgpu::InstanceDescriptor;
 
+mod passes;
+mod render_graph;
+
 use std::sync::Arc;
 use web_time::{Duration, Instant};
 use winit::{
@@ -12,10 +15,7 @@ use winit::{
 };
 
 use kira::{
-    AudioManager,
-    AudioManagerSettings,
-    DefaultBackend,
-    sound::static_sound::StaticSoundData,
+    AudioManager, AudioManagerSettings, DefaultBackend, sound::static_sound::StaticSoundData,
 };
 
 #[derive(Default)]
@@ -198,7 +198,10 @@ impl ApplicationHandler for App {
                                 self.audio_manager = Some(manager);
                             }
                             Err(error) => {
-                                log::error!("Failed to initialize audio manager on WASM: {:?}", error);
+                                log::error!(
+                                    "Failed to initialize audio manager on WASM: {:?}",
+                                    error
+                                );
                             }
                         }
                     }
@@ -207,65 +210,65 @@ impl ApplicationHandler for App {
                 if let Some(audio_manager) = self.audio_manager.as_mut() {
                     #[cfg(not(target_arch = "wasm32"))]
                     let sound_result = match key_code {
-                        winit::keyboard::KeyCode::Digit1 => Some(StaticSoundData::from_file("assets/blip.ogg")),
-                        winit::keyboard::KeyCode::Digit2 => Some(StaticSoundData::from_file("assets/drums.ogg")),
-                        winit::keyboard::KeyCode::Digit3 => Some(StaticSoundData::from_file("assets/score.ogg")),
-                        winit::keyboard::KeyCode::Digit4 => Some(StaticSoundData::from_file("assets/sine.wav")),
-                        winit::keyboard::KeyCode::KeyQ => Some(StaticSoundData::from_file("assets/dynamic/arp.ogg")),
-                        winit::keyboard::KeyCode::KeyW => Some(StaticSoundData::from_file("assets/dynamic/bass.ogg")),
-                        winit::keyboard::KeyCode::KeyE => Some(StaticSoundData::from_file("assets/dynamic/drums.ogg")),
-                        winit::keyboard::KeyCode::KeyR => Some(StaticSoundData::from_file("assets/dynamic/lead.ogg")),
-                        winit::keyboard::KeyCode::KeyT => Some(StaticSoundData::from_file("assets/dynamic/pad.ogg")),
+                        winit::keyboard::KeyCode::Digit1 => {
+                            Some(StaticSoundData::from_file("assets/blip.ogg"))
+                        }
+                        winit::keyboard::KeyCode::Digit2 => {
+                            Some(StaticSoundData::from_file("assets/drums.ogg"))
+                        }
+                        winit::keyboard::KeyCode::Digit3 => {
+                            Some(StaticSoundData::from_file("assets/score.ogg"))
+                        }
+                        winit::keyboard::KeyCode::Digit4 => {
+                            Some(StaticSoundData::from_file("assets/sine.wav"))
+                        }
+                        winit::keyboard::KeyCode::KeyQ => {
+                            Some(StaticSoundData::from_file("assets/dynamic/arp.ogg"))
+                        }
+                        winit::keyboard::KeyCode::KeyW => {
+                            Some(StaticSoundData::from_file("assets/dynamic/bass.ogg"))
+                        }
+                        winit::keyboard::KeyCode::KeyE => {
+                            Some(StaticSoundData::from_file("assets/dynamic/drums.ogg"))
+                        }
+                        winit::keyboard::KeyCode::KeyR => {
+                            Some(StaticSoundData::from_file("assets/dynamic/lead.ogg"))
+                        }
+                        winit::keyboard::KeyCode::KeyT => {
+                            Some(StaticSoundData::from_file("assets/dynamic/pad.ogg"))
+                        }
                         _ => None,
                     };
 
                     #[cfg(target_arch = "wasm32")]
                     let sound_result = match key_code {
-                        winit::keyboard::KeyCode::Digit1 => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/blip.ogg"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::Digit2 => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/drums.ogg"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::Digit3 => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/score.ogg"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::Digit4 => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/sine.wav"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::KeyQ => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/dynamic/arp.ogg"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::KeyW => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/dynamic/bass.ogg"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::KeyE => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/dynamic/drums.ogg"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::KeyR => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/dynamic/lead.ogg"))
-                            ))
-                        }
-                        winit::keyboard::KeyCode::KeyT => {
-                            Some(StaticSoundData::from_cursor(
-                                std::io::Cursor::new(include_bytes!("../assets/dynamic/pad.ogg"))
-                            ))
-                        }
+                        winit::keyboard::KeyCode::Digit1 => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/blip.ogg")),
+                        )),
+                        winit::keyboard::KeyCode::Digit2 => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/drums.ogg")),
+                        )),
+                        winit::keyboard::KeyCode::Digit3 => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/score.ogg")),
+                        )),
+                        winit::keyboard::KeyCode::Digit4 => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/sine.wav")),
+                        )),
+                        winit::keyboard::KeyCode::KeyQ => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/dynamic/arp.ogg")),
+                        )),
+                        winit::keyboard::KeyCode::KeyW => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/dynamic/bass.ogg")),
+                        )),
+                        winit::keyboard::KeyCode::KeyE => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/dynamic/drums.ogg")),
+                        )),
+                        winit::keyboard::KeyCode::KeyR => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/dynamic/lead.ogg")),
+                        )),
+                        winit::keyboard::KeyCode::KeyT => Some(StaticSoundData::from_cursor(
+                            std::io::Cursor::new(include_bytes!("../assets/dynamic/pad.ogg")),
+                        )),
                         _ => None,
                     };
 
@@ -381,6 +384,212 @@ impl ApplicationHandler for App {
 
                     egui::SidePanel::right("right").show(gui_state.egui_ctx(), |ui| {
                         ui.heading("Inspector");
+                        ui.separator();
+
+                        ui.collapsing("Render Graph", |ui| {
+                            let mut edge_detection_enabled = renderer.is_edge_detection_enabled();
+                            if ui
+                                .checkbox(&mut edge_detection_enabled, "Edge Detection")
+                                .changed()
+                            {
+                                renderer.set_edge_detection_enabled(edge_detection_enabled);
+                            }
+
+                            let mut brightness_contrast_enabled =
+                                renderer.is_brightness_contrast_enabled();
+                            if ui
+                                .checkbox(&mut brightness_contrast_enabled, "Brightness/Contrast")
+                                .changed()
+                            {
+                                renderer
+                                    .set_brightness_contrast_enabled(brightness_contrast_enabled);
+                            }
+
+                            if brightness_contrast_enabled {
+                                let mut brightness = renderer.get_brightness();
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut brightness, -0.5..=0.5)
+                                            .text("Brightness"),
+                                    )
+                                    .changed()
+                                {
+                                    renderer.set_brightness(brightness);
+                                }
+
+                                let mut contrast = renderer.get_contrast();
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut contrast, 0.0..=2.0)
+                                            .text("Contrast"),
+                                    )
+                                    .changed()
+                                {
+                                    renderer.set_contrast(contrast);
+                                }
+                            }
+
+                            let mut gaussian_blur_enabled = renderer.is_gaussian_blur_enabled();
+                            if ui
+                                .checkbox(&mut gaussian_blur_enabled, "Gaussian Blur")
+                                .changed()
+                            {
+                                renderer.set_gaussian_blur_enabled(gaussian_blur_enabled);
+                            }
+
+                            let mut histogram_compute_enabled =
+                                renderer.is_histogram_compute_enabled();
+                            if ui
+                                .checkbox(&mut histogram_compute_enabled, "Histogram Compute")
+                                .changed()
+                            {
+                                renderer.set_histogram_compute_enabled(histogram_compute_enabled);
+                            }
+
+                            if histogram_compute_enabled
+                                && let Some(histogram_data) = renderer.get_histogram_data()
+                            {
+                                let max_value = histogram_data.iter().copied().max().unwrap_or(1);
+                                ui.label("Luminance Histogram:");
+
+                                let bar_width = 2.0;
+                                let chart_width = 256.0 * bar_width;
+                                let chart_height = 100.0;
+
+                                let (response, painter) = ui.allocate_painter(
+                                    egui::Vec2::new(chart_width, chart_height),
+                                    egui::Sense::hover(),
+                                );
+
+                                let rect = response.rect;
+
+                                for (bin_index, &value) in histogram_data.iter().enumerate() {
+                                    if value == 0 {
+                                        continue;
+                                    }
+
+                                    let normalized_height =
+                                        (value as f32 / max_value as f32) * chart_height;
+                                    let x = rect.min.x + bin_index as f32 * bar_width;
+                                    let y_bottom = rect.max.y;
+                                    let y_top = y_bottom - normalized_height;
+
+                                    let bar_rect = egui::Rect::from_min_max(
+                                        egui::pos2(x, y_top),
+                                        egui::pos2(x + bar_width, y_bottom),
+                                    );
+
+                                    painter.rect_filled(bar_rect, 0.0, egui::Color32::GREEN);
+                                }
+
+                                painter.rect(
+                                    rect,
+                                    0.0,
+                                    egui::Color32::TRANSPARENT,
+                                    egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+                                    egui::epaint::StrokeKind::Inside,
+                                );
+                            }
+
+                            let mut convolution_enabled = renderer.is_convolution_enabled();
+                            if ui
+                                .checkbox(&mut convolution_enabled, "Convolution")
+                                .changed()
+                            {
+                                renderer.set_convolution_enabled(convolution_enabled);
+                            }
+
+                            if convolution_enabled {
+                                ui.label("Kernel:");
+                                if ui.button("Identity").clicked() {
+                                    renderer.set_convolution_kernel([
+                                        0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                                    ]);
+                                }
+                                if ui.button("Sharpen").clicked() {
+                                    renderer.set_convolution_kernel([
+                                        0.0, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0,
+                                    ]);
+                                }
+                                if ui.button("Edge Detect").clicked() {
+                                    renderer.set_convolution_kernel([
+                                        -1.0, -1.0, -1.0, -1.0, 8.0, -1.0, -1.0, -1.0, -1.0,
+                                    ]);
+                                }
+                                if ui.button("Box Blur").clicked() {
+                                    renderer.set_convolution_kernel([
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                        1.0 / 9.0,
+                                    ]);
+                                }
+                                if ui.button("Emboss").clicked() {
+                                    renderer.set_convolution_kernel([
+                                        -2.0, -1.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0, 2.0,
+                                    ]);
+                                }
+                            }
+
+                            let mut vignette_enabled = renderer.is_vignette_enabled();
+                            if ui.checkbox(&mut vignette_enabled, "Vignette").changed() {
+                                renderer.set_vignette_enabled(vignette_enabled);
+                            }
+
+                            if vignette_enabled {
+                                let mut strength = renderer.get_vignette_strength();
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut strength, 0.5..=3.0)
+                                            .text("Strength"),
+                                    )
+                                    .changed()
+                                {
+                                    renderer.set_vignette_strength(strength);
+                                }
+
+                                let mut radius = renderer.get_vignette_radius();
+                                if ui
+                                    .add(egui::Slider::new(&mut radius, 0.0..=0.8).text("Radius"))
+                                    .changed()
+                                {
+                                    renderer.set_vignette_radius(radius);
+                                }
+
+                                let mut color_tint = renderer.get_vignette_color_tint();
+                                let mut egui_color_bytes = [
+                                    (color_tint[0] * 255.0) as u8,
+                                    (color_tint[1] * 255.0) as u8,
+                                    (color_tint[2] * 255.0) as u8,
+                                ];
+                                if ui.color_edit_button_srgb(&mut egui_color_bytes).changed() {
+                                    color_tint = [
+                                        egui_color_bytes[0] as f32 / 255.0,
+                                        egui_color_bytes[1] as f32 / 255.0,
+                                        egui_color_bytes[2] as f32 / 255.0,
+                                    ];
+                                    renderer.set_vignette_color_tint(color_tint);
+                                }
+                            }
+
+                            let mut grayscale_enabled = renderer.is_grayscale_enabled();
+                            if ui.checkbox(&mut grayscale_enabled, "Grayscale").changed() {
+                                renderer.set_grayscale_enabled(grayscale_enabled);
+                            }
+
+                            let mut color_invert_enabled = renderer.is_color_invert_enabled();
+                            if ui
+                                .checkbox(&mut color_invert_enabled, "Color Invert")
+                                .changed()
+                            {
+                                renderer.set_color_invert_enabled(color_invert_enabled);
+                            }
+                        });
                     });
 
                     egui::TopBottomPanel::bottom("Console").show(gui_state.egui_ctx(), |ui| {
@@ -420,11 +629,34 @@ impl ApplicationHandler for App {
     }
 }
 
+use passes::{
+    BlitPass, BlitPassData, BrightnessContrastPass, BrightnessContrastPassData, ColorInvertPass,
+    ColorInvertPassData, ConvolutionPass, ConvolutionPassData, EdgeDetectionPass,
+    EdgeDetectionPassData, EguiPass, EguiPassData, GaussianBlurHorizontalPass,
+    GaussianBlurPassData, GaussianBlurVerticalPass, GrayscalePass, GrayscalePassData,
+    HistogramComputePass, HistogramComputePassData, PostProcessPass, PostProcessPassData,
+    ScenePass, ScenePassData, VignettePass, VignettePassData,
+};
+use render_graph::{RenderGraph, ResourceId};
+
 pub struct Renderer {
     gpu: Gpu,
     depth_texture_view: wgpu::TextureView,
-    egui_renderer: egui_wgpu::Renderer,
     scene: Scene,
+    render_graph: RenderGraph,
+    surface_resource_id: ResourceId,
+    depth_resource_id: ResourceId,
+    hdr_resource_id: ResourceId,
+    output_resource_id: ResourceId,
+    output_with_edges_resource_id: ResourceId,
+    output_with_brightness_contrast_resource_id: ResourceId,
+    blur_horizontal_resource_id: ResourceId,
+    blur_vertical_resource_id: ResourceId,
+    convolution_resource_id: ResourceId,
+    vignette_resource_id: ResourceId,
+    grayscale_resource_id: ResourceId,
+    color_invert_resource_id: ResourceId,
+    histogram_readback_buffer: Arc<wgpu::Buffer>,
 }
 
 impl Renderer {
@@ -438,27 +670,960 @@ impl Renderer {
         let gpu = Gpu::new_async(window, width, height).await;
         let depth_texture_view = gpu.create_depth_texture(width, height);
 
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &gpu.device,
-            gpu.surface_config.format,
-            Some(Self::DEPTH_FORMAT),
-            1,
-            false,
-        );
+        let egui_renderer =
+            egui_wgpu::Renderer::new(&gpu.device, gpu.surface_config.format, None, 1, false);
 
-        let scene = Scene::new(&gpu.device, gpu.surface_format, &gpu.queue);
+        let scene = Scene::new(&gpu.device, wgpu::TextureFormat::Rgba16Float, &gpu.queue);
+
+        let (post_process_pipeline, post_process_bind_group_layout) =
+            PostProcessPass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let post_process_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Post Process Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let post_process_data = PostProcessPassData {
+            pipeline: post_process_pipeline,
+            bind_group_layout: post_process_bind_group_layout,
+            sampler: post_process_sampler,
+        };
+
+        let (edge_detection_pipeline, edge_detection_bind_group_layout) =
+            EdgeDetectionPass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let edge_detection_sampler =
+            Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Edge Detection Sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            }));
+
+        let (blit_pipeline, blit_bind_group_layout) =
+            BlitPass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let edge_detection_data = EdgeDetectionPassData {
+            pipeline: edge_detection_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: edge_detection_bind_group_layout,
+            sampler: edge_detection_sampler,
+        };
+
+        let blit_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Blit Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let (brightness_contrast_pipeline, brightness_contrast_bind_group_layout) =
+            BrightnessContrastPass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let brightness_contrast_uniform_buffer =
+            Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Brightness/Contrast Uniform Buffer"),
+                size: std::mem::size_of::<[f32; 2]>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+        let brightness_contrast_sampler =
+            Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Brightness/Contrast Sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            }));
+
+        let brightness_contrast_data = BrightnessContrastPassData {
+            pipeline: brightness_contrast_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: brightness_contrast_bind_group_layout,
+            sampler: brightness_contrast_sampler,
+        };
+
+        let (gaussian_blur_pipeline, gaussian_blur_bind_group_layout) =
+            GaussianBlurHorizontalPass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let gaussian_blur_horizontal_uniform_buffer =
+            Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Gaussian Blur Horizontal Uniform Buffer"),
+                size: std::mem::size_of::<[f32; 2]>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+        let gaussian_blur_vertical_uniform_buffer =
+            Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Gaussian Blur Vertical Uniform Buffer"),
+                size: std::mem::size_of::<[f32; 2]>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+        let gaussian_blur_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Gaussian Blur Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let gaussian_blur_data = GaussianBlurPassData {
+            pipeline: gaussian_blur_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: gaussian_blur_bind_group_layout,
+            sampler: gaussian_blur_sampler,
+        };
+
+        let (histogram_compute_pipeline, histogram_compute_bind_group_layout) =
+            HistogramComputePass::create_pipeline(&gpu.device);
+
+        let histogram_buffer = Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Histogram Buffer"),
+            size: (256 * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        let histogram_readback_buffer =
+            Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Histogram Readback Buffer"),
+                size: (256 * std::mem::size_of::<u32>()) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+        let histogram_compute_data = HistogramComputePassData {
+            pipeline: histogram_compute_pipeline,
+            bind_group_layout: histogram_compute_bind_group_layout,
+        };
+
+        let (convolution_pipeline, convolution_bind_group_layout) =
+            ConvolutionPass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let convolution_kernel_buffer =
+            Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Convolution Kernel Buffer"),
+                size: std::mem::size_of::<[[f32; 4]; 3]>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+        let convolution_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Convolution Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let convolution_data = ConvolutionPassData {
+            pipeline: convolution_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: convolution_bind_group_layout,
+            sampler: convolution_sampler,
+        };
+
+        let (vignette_pipeline, vignette_bind_group_layout) =
+            VignettePass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let vignette_uniform_buffer = Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Vignette Uniform Buffer"),
+            size: std::mem::size_of::<[f32; 8]>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        let vignette_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Vignette Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let vignette_data = VignettePassData {
+            pipeline: vignette_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: vignette_bind_group_layout,
+            sampler: vignette_sampler,
+        };
+
+        let (grayscale_pipeline, grayscale_bind_group_layout) =
+            GrayscalePass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let grayscale_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Grayscale Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let grayscale_data = GrayscalePassData {
+            pipeline: grayscale_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: grayscale_bind_group_layout,
+            sampler: grayscale_sampler,
+        };
+
+        let (color_invert_pipeline, color_invert_bind_group_layout) =
+            ColorInvertPass::create_pipeline(&gpu.device, gpu.surface_format);
+
+        let color_invert_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Color Invert Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let color_invert_data = ColorInvertPassData {
+            pipeline: color_invert_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: color_invert_bind_group_layout,
+            sampler: color_invert_sampler,
+        };
+
+        let blit_data = BlitPassData {
+            pipeline: blit_pipeline,
+            bind_group_layout: blit_bind_group_layout,
+            sampler: blit_sampler,
+        };
+
+        let mut graph = RenderGraph::new();
+
+        let output_resource_id = graph
+            .add_color_texture("output")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let output_with_edges_resource_id = graph
+            .add_color_texture("output_with_edges")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let output_with_brightness_contrast_resource_id = graph
+            .add_color_texture("output_with_brightness_contrast")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let blur_horizontal_resource_id = graph
+            .add_color_texture("blur_horizontal")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let blur_vertical_resource_id = graph
+            .add_color_texture("blur_vertical")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let convolution_resource_id = graph
+            .add_color_texture("convolution")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let vignette_resource_id = graph
+            .add_color_texture("vignette")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let grayscale_resource_id = graph
+            .add_color_texture("grayscale")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let color_invert_resource_id = graph
+            .add_color_texture("color_invert")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
+        let surface_resource_id = graph
+            .add_color_texture("surface")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT)
+            .sample_count(1)
+            .mip_levels(1)
+            .external();
+
+        let hdr_resource_id = graph
+            .add_color_texture("hdr_buffer")
+            .format(wgpu::TextureFormat::Rgba16Float)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .clear_color(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            })
+            .transient();
+
+        let depth_resource_id = graph
+            .add_depth_texture("depth")
+            .format(wgpu::TextureFormat::Depth32Float)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT)
+            .sample_count(1)
+            .mip_levels(1)
+            .clear_depth(1.0)
+            .external();
+
+        let egui_pass_data = EguiPassData {
+            renderer: egui_renderer,
+            paint_jobs: Vec::new(),
+            screen_descriptor: egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [width, height],
+                pixels_per_point: 1.0,
+            },
+        };
+
+        graph.add_pass(Box::new(ScenePass::new(
+            ScenePassData {
+                pipeline: Arc::clone(&scene.pipeline),
+                vertex_buffer: Arc::clone(&scene.vertex_buffer),
+                index_buffer: Arc::clone(&scene.index_buffer),
+                index_count: INDICES.len() as u32,
+                uniform_bind_group: Arc::clone(&scene.uniform.bind_group),
+                texture_bind_group: Arc::clone(&scene.texture_bind_group),
+            },
+            hdr_resource_id,
+            depth_resource_id,
+        )));
+
+        graph.add_pass(Box::new(PostProcessPass::new(
+            PostProcessPassData {
+                pipeline: Arc::clone(&post_process_data.pipeline),
+                bind_group_layout: Arc::clone(&post_process_data.bind_group_layout),
+                sampler: Arc::clone(&post_process_data.sampler),
+            },
+            hdr_resource_id,
+            output_resource_id,
+        )));
+
+        graph.add_pass(Box::new(EdgeDetectionPass::new(
+            EdgeDetectionPassData {
+                pipeline: Arc::clone(&edge_detection_data.pipeline),
+                blit_pipeline: Arc::clone(&edge_detection_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&edge_detection_data.bind_group_layout),
+                sampler: Arc::clone(&edge_detection_data.sampler),
+            },
+            output_resource_id,
+            output_with_edges_resource_id,
+        )));
+
+        graph.add_pass(Box::new(BrightnessContrastPass::new(
+            BrightnessContrastPassData {
+                pipeline: Arc::clone(&brightness_contrast_data.pipeline),
+                blit_pipeline: Arc::clone(&brightness_contrast_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&brightness_contrast_data.bind_group_layout),
+                sampler: Arc::clone(&brightness_contrast_data.sampler),
+            },
+            output_with_edges_resource_id,
+            output_with_brightness_contrast_resource_id,
+            brightness_contrast_uniform_buffer,
+        )));
+
+        graph.add_pass(Box::new(GaussianBlurHorizontalPass::new(
+            GaussianBlurPassData {
+                pipeline: Arc::clone(&gaussian_blur_data.pipeline),
+                blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
+                sampler: Arc::clone(&gaussian_blur_data.sampler),
+            },
+            output_with_brightness_contrast_resource_id,
+            blur_horizontal_resource_id,
+            gaussian_blur_horizontal_uniform_buffer,
+        )));
+
+        graph.add_pass(Box::new(GaussianBlurVerticalPass::new(
+            GaussianBlurPassData {
+                pipeline: Arc::clone(&gaussian_blur_data.pipeline),
+                blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
+                sampler: Arc::clone(&gaussian_blur_data.sampler),
+            },
+            blur_horizontal_resource_id,
+            blur_vertical_resource_id,
+            gaussian_blur_vertical_uniform_buffer,
+        )));
+
+        graph.add_pass(Box::new(HistogramComputePass::new(
+            HistogramComputePassData {
+                pipeline: Arc::clone(&histogram_compute_data.pipeline),
+                bind_group_layout: Arc::clone(&histogram_compute_data.bind_group_layout),
+            },
+            blur_vertical_resource_id,
+            Arc::clone(&histogram_buffer),
+            Arc::clone(&histogram_readback_buffer),
+            gpu.surface_config.width,
+            gpu.surface_config.height,
+        )));
+
+        graph.add_pass(Box::new(ConvolutionPass::new(
+            ConvolutionPassData {
+                pipeline: Arc::clone(&convolution_data.pipeline),
+                blit_pipeline: Arc::clone(&convolution_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&convolution_data.bind_group_layout),
+                sampler: Arc::clone(&convolution_data.sampler),
+            },
+            blur_vertical_resource_id,
+            convolution_resource_id,
+            convolution_kernel_buffer,
+        )));
+
+        graph.add_pass(Box::new(VignettePass::new(
+            VignettePassData {
+                pipeline: Arc::clone(&vignette_data.pipeline),
+                blit_pipeline: Arc::clone(&vignette_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&vignette_data.bind_group_layout),
+                sampler: Arc::clone(&vignette_data.sampler),
+            },
+            convolution_resource_id,
+            vignette_resource_id,
+            vignette_uniform_buffer,
+        )));
+
+        graph.add_pass(Box::new(GrayscalePass::new(
+            GrayscalePassData {
+                pipeline: Arc::clone(&grayscale_data.pipeline),
+                blit_pipeline: Arc::clone(&grayscale_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&grayscale_data.bind_group_layout),
+                sampler: Arc::clone(&grayscale_data.sampler),
+            },
+            vignette_resource_id,
+            grayscale_resource_id,
+        )));
+
+        graph.add_pass(Box::new(ColorInvertPass::new(
+            ColorInvertPassData {
+                pipeline: Arc::clone(&color_invert_data.pipeline),
+                blit_pipeline: Arc::clone(&color_invert_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&color_invert_data.bind_group_layout),
+                sampler: Arc::clone(&color_invert_data.sampler),
+            },
+            grayscale_resource_id,
+            color_invert_resource_id,
+        )));
+
+        graph.add_pass(Box::new(EguiPass::new(
+            egui_pass_data,
+            color_invert_resource_id,
+        )));
+
+        graph.add_pass(Box::new(BlitPass::new(
+            BlitPassData {
+                pipeline: Arc::clone(&blit_data.pipeline),
+                bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
+                sampler: Arc::clone(&blit_data.sampler),
+            },
+            "blit_to_surface".to_string(),
+            color_invert_resource_id,
+            surface_resource_id,
+        )));
+
+        graph.compile().expect("Failed to compile render graph");
+
+        log::info!("Render graph compiled successfully");
+        log::info!("Execution order: {:?}", graph.get_execution_order());
 
         Self {
             gpu,
             depth_texture_view,
-            egui_renderer,
             scene,
+            render_graph: graph,
+            surface_resource_id,
+            depth_resource_id,
+            hdr_resource_id,
+            output_resource_id,
+            output_with_edges_resource_id,
+            output_with_brightness_contrast_resource_id,
+            blur_horizontal_resource_id,
+            blur_vertical_resource_id,
+            convolution_resource_id,
+            vignette_resource_id,
+            grayscale_resource_id,
+            color_invert_resource_id,
+            histogram_readback_buffer,
+        }
+    }
+
+    pub fn set_edge_detection_enabled(&mut self, enabled: bool) {
+        if let Some(edge_detection_pass) = self
+            .render_graph
+            .get_pass_mut::<EdgeDetectionPass>("edge_detection_pass")
+        {
+            edge_detection_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_edge_detection_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<EdgeDetectionPass>("edge_detection_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn set_brightness_contrast_enabled(&mut self, enabled: bool) {
+        if let Some(brightness_contrast_pass) = self
+            .render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+        {
+            brightness_contrast_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_brightness_contrast_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn set_brightness(&mut self, brightness: f32) {
+        if let Some(brightness_contrast_pass) = self
+            .render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+        {
+            brightness_contrast_pass.brightness = brightness;
+        }
+    }
+
+    pub fn get_brightness(&mut self) -> f32 {
+        self.render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+            .map(|pass| pass.brightness)
+            .unwrap_or(0.0)
+    }
+
+    pub fn set_contrast(&mut self, contrast: f32) {
+        if let Some(brightness_contrast_pass) = self
+            .render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+        {
+            brightness_contrast_pass.contrast = contrast;
+        }
+    }
+
+    pub fn get_contrast(&mut self) -> f32 {
+        self.render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+            .map(|pass| pass.contrast)
+            .unwrap_or(1.0)
+    }
+
+    pub fn set_gaussian_blur_enabled(&mut self, enabled: bool) {
+        if let Some(gaussian_blur_horizontal_pass) = self
+            .render_graph
+            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
+        {
+            gaussian_blur_horizontal_pass.set_enabled(enabled);
+        }
+        if let Some(gaussian_blur_vertical_pass) = self
+            .render_graph
+            .get_pass_mut::<GaussianBlurVerticalPass>("gaussian_blur_vertical_pass")
+        {
+            gaussian_blur_vertical_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_gaussian_blur_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn set_histogram_compute_enabled(&mut self, enabled: bool) {
+        if let Some(histogram_compute_pass) = self
+            .render_graph
+            .get_pass_mut::<HistogramComputePass>("histogram_compute_pass")
+        {
+            histogram_compute_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_histogram_compute_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<HistogramComputePass>("histogram_compute_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn set_convolution_enabled(&mut self, enabled: bool) {
+        if let Some(convolution_pass) = self
+            .render_graph
+            .get_pass_mut::<ConvolutionPass>("convolution_pass")
+        {
+            convolution_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_convolution_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<ConvolutionPass>("convolution_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn set_convolution_kernel(&mut self, kernel: [f32; 9]) {
+        if let Some(convolution_pass) = self
+            .render_graph
+            .get_pass_mut::<ConvolutionPass>("convolution_pass")
+        {
+            convolution_pass.set_kernel(kernel);
+        }
+    }
+
+    pub fn get_convolution_kernel(&mut self) -> [f32; 9] {
+        self.render_graph
+            .get_pass_mut::<ConvolutionPass>("convolution_pass")
+            .map(|pass| pass.kernel)
+            .unwrap_or([0.0; 9])
+    }
+
+    pub fn set_vignette_enabled(&mut self, enabled: bool) {
+        if let Some(vignette_pass) = self
+            .render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+        {
+            vignette_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_vignette_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn set_vignette_strength(&mut self, strength: f32) {
+        if let Some(vignette_pass) = self
+            .render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+        {
+            vignette_pass.strength = strength;
+        }
+    }
+
+    pub fn get_vignette_strength(&mut self) -> f32 {
+        self.render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+            .map(|pass| pass.strength)
+            .unwrap_or(1.5)
+    }
+
+    pub fn set_vignette_radius(&mut self, radius: f32) {
+        if let Some(vignette_pass) = self
+            .render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+        {
+            vignette_pass.radius = radius;
+        }
+    }
+
+    pub fn get_vignette_radius(&mut self) -> f32 {
+        self.render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+            .map(|pass| pass.radius)
+            .unwrap_or(0.3)
+    }
+
+    pub fn set_vignette_color_tint(&mut self, color_tint: [f32; 3]) {
+        if let Some(vignette_pass) = self
+            .render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+        {
+            vignette_pass.color_tint = color_tint;
+        }
+    }
+
+    pub fn get_vignette_color_tint(&mut self) -> [f32; 3] {
+        self.render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+            .map(|pass| pass.color_tint)
+            .unwrap_or([0.0, 0.0, 0.0])
+    }
+
+    pub fn set_grayscale_enabled(&mut self, enabled: bool) {
+        if let Some(grayscale_pass) = self
+            .render_graph
+            .get_pass_mut::<GrayscalePass>("grayscale_pass")
+        {
+            grayscale_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_grayscale_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<GrayscalePass>("grayscale_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn set_color_invert_enabled(&mut self, enabled: bool) {
+        if let Some(color_invert_pass) = self
+            .render_graph
+            .get_pass_mut::<ColorInvertPass>("color_invert_pass")
+        {
+            color_invert_pass.set_enabled(enabled);
+        }
+    }
+
+    pub fn is_color_invert_enabled(&mut self) -> bool {
+        self.render_graph
+            .get_pass_mut::<ColorInvertPass>("color_invert_pass")
+            .map(|pass| pass.is_enabled())
+            .unwrap_or(false)
+    }
+
+    pub fn get_histogram_data(&self) -> Option<Vec<u32>> {
+        let buffer_slice = self.histogram_readback_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).ok();
+        });
+        let _ = self.gpu.device.poll(wgpu::MaintainBase::Wait);
+
+        if receiver.recv().ok()?.is_ok() {
+            let data = buffer_slice.get_mapped_range();
+            let histogram: Vec<u32> = bytemuck::cast_slice(&data).to_vec();
+            drop(data);
+            self.histogram_readback_buffer.unmap();
+            Some(histogram)
+        } else {
+            None
         }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
         self.depth_texture_view = self.gpu.create_depth_texture(width, height);
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.hdr_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.output_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.output_with_edges_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.output_with_brightness_contrast_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.blur_horizontal_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.blur_vertical_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.convolution_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.vignette_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.grayscale_resource_id,
+            width,
+            height,
+        );
+
+        self.render_graph.resources_mut().resize_transient_resource(
+            &self.gpu.device,
+            self.color_invert_resource_id,
+            width,
+            height,
+        );
+
+        if let Some(post_process_pass) = self
+            .render_graph
+            .get_pass_mut::<PostProcessPass>("post_process_pass")
+        {
+            post_process_pass.invalidate_bind_group();
+        }
+
+        if let Some(edge_detection_pass) = self
+            .render_graph
+            .get_pass_mut::<EdgeDetectionPass>("edge_detection_pass")
+        {
+            edge_detection_pass.invalidate_bind_group();
+        }
+
+        if let Some(brightness_contrast_pass) = self
+            .render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+        {
+            brightness_contrast_pass.invalidate_bind_groups();
+        }
+
+        if let Some(gaussian_blur_horizontal_pass) = self
+            .render_graph
+            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
+        {
+            gaussian_blur_horizontal_pass.invalidate_bind_groups();
+        }
+
+        if let Some(gaussian_blur_vertical_pass) = self
+            .render_graph
+            .get_pass_mut::<GaussianBlurVerticalPass>("gaussian_blur_vertical_pass")
+        {
+            gaussian_blur_vertical_pass.invalidate_bind_groups();
+        }
+
+        if let Some(histogram_compute_pass) = self
+            .render_graph
+            .get_pass_mut::<HistogramComputePass>("histogram_compute_pass")
+        {
+            histogram_compute_pass.invalidate_bind_group();
+            histogram_compute_pass.update_dimensions(width, height);
+        }
+
+        if let Some(convolution_pass) = self
+            .render_graph
+            .get_pass_mut::<ConvolutionPass>("convolution_pass")
+        {
+            convolution_pass.invalidate_bind_groups();
+        }
+
+        if let Some(vignette_pass) = self
+            .render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+        {
+            vignette_pass.invalidate_bind_groups();
+        }
+
+        if let Some(grayscale_pass) = self
+            .render_graph
+            .get_pass_mut::<GrayscalePass>("grayscale_pass")
+        {
+            grayscale_pass.invalidate_bind_groups();
+        }
+
+        if let Some(color_invert_pass) = self
+            .render_graph
+            .get_pass_mut::<ColorInvertPass>("color_invert_pass")
+        {
+            color_invert_pass.invalidate_bind_groups();
+        }
+
+        if let Some(blit_pass) = self
+            .render_graph
+            .get_pass_mut::<BlitPass>("blit_to_surface")
+        {
+            blit_pass.invalidate_bind_group();
+        }
     }
 
     pub fn render_frame(
@@ -473,13 +1638,22 @@ impl Renderer {
         self.scene
             .update(&self.gpu.queue, self.gpu.aspect_ratio(), delta_time);
 
+        let egui_pass = self
+            .render_graph
+            .get_pass_mut::<EguiPass>("egui_pass")
+            .expect("Egui pass not found");
+
         for (id, image_delta) in &textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.gpu.device, &self.gpu.queue, *id, image_delta);
+            egui_pass.data.renderer.update_texture(
+                &self.gpu.device,
+                &self.gpu.queue,
+                *id,
+                image_delta,
+            );
         }
 
         for id in &textures_delta.free {
-            self.egui_renderer.free_texture(id);
+            egui_pass.data.renderer.free_texture(id);
         }
 
         let mut encoder = self
@@ -489,13 +1663,56 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
-        self.egui_renderer.update_buffers(
+        let egui_pass = self
+            .render_graph
+            .get_pass_mut::<EguiPass>("egui_pass")
+            .expect("Egui pass not found");
+
+        egui_pass.data.renderer.update_buffers(
             &self.gpu.device,
             &self.gpu.queue,
             &mut encoder,
             &paint_jobs,
             &screen_descriptor,
         );
+
+        egui_pass.data.paint_jobs = paint_jobs;
+        egui_pass.data.screen_descriptor = screen_descriptor;
+
+        if let Some(brightness_contrast_pass) = self
+            .render_graph
+            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
+        {
+            brightness_contrast_pass.update_uniforms(&self.gpu.queue);
+        }
+
+        if let Some(gaussian_blur_horizontal_pass) = self
+            .render_graph
+            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
+        {
+            gaussian_blur_horizontal_pass.update_uniforms(&self.gpu.queue);
+        }
+
+        if let Some(gaussian_blur_vertical_pass) = self
+            .render_graph
+            .get_pass_mut::<GaussianBlurVerticalPass>("gaussian_blur_vertical_pass")
+        {
+            gaussian_blur_vertical_pass.update_uniforms(&self.gpu.queue);
+        }
+
+        if let Some(convolution_pass) = self
+            .render_graph
+            .get_pass_mut::<ConvolutionPass>("convolution_pass")
+        {
+            convolution_pass.update_uniforms(&self.gpu.queue);
+        }
+
+        if let Some(vignette_pass) = self
+            .render_graph
+            .get_pass_mut::<VignettePass>("vignette_pass")
+        {
+            vignette_pass.update_uniforms(&self.gpu.queue);
+        }
 
         let surface_texture = match self.gpu.surface.get_current_texture() {
             Ok(texture) => texture,
@@ -526,43 +1743,14 @@ impl Renderer {
                     usage: None,
                 });
 
-        encoder.insert_debug_marker("Render scene");
+        self.render_graph
+            .resources_mut()
+            .set_external_texture(self.surface_resource_id, surface_texture_view);
+        self.render_graph
+            .resources_mut()
+            .set_external_texture(self.depth_resource_id, self.depth_texture_view.clone());
 
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_texture_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.19,
-                            g: 0.24,
-                            b: 0.42,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            self.scene.render(&mut render_pass);
-
-            self.egui_renderer.render(
-                &mut render_pass.forget_lifetime(),
-                &paint_jobs,
-                &screen_descriptor,
-            );
-        }
+        self.render_graph.execute(&self.gpu.device, &mut encoder);
 
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         surface_texture.present();
@@ -797,22 +1985,25 @@ impl TextureAtlas {
 
         region_index
     }
-
 }
 
 struct Scene {
     pub model: nalgebra_glm::Mat4,
-    pub vertex_buffer: wgpu::Buffer,
-    pub index_buffer: wgpu::Buffer,
+    pub vertex_buffer: Arc<wgpu::Buffer>,
+    pub index_buffer: Arc<wgpu::Buffer>,
     pub uniform: UniformBinding,
     _texture_atlas: TextureAtlas,
-    pub texture_bind_group: wgpu::BindGroup,
+    pub texture_bind_group: Arc<wgpu::BindGroup>,
     _atlas_regions_buffer: wgpu::Buffer,
-    pub pipeline: wgpu::RenderPipeline,
+    pub pipeline: Arc<wgpu::RenderPipeline>,
 }
 
 impl Scene {
-    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat, queue: &wgpu::Queue) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        queue: &wgpu::Queue,
+    ) -> Self {
         let vertex_buffer = wgpu::util::DeviceExt::create_buffer_init(
             device,
             &wgpu::util::BufferInitDescriptor {
@@ -851,7 +2042,12 @@ impl Scene {
             (img.into_raw(), dimensions.0, dimensions.1)
         };
 
-        texture_atlas.add_texture(queue, &awesomeface_data.0, awesomeface_data.1, awesomeface_data.2);
+        texture_atlas.add_texture(
+            queue,
+            &awesomeface_data.0,
+            awesomeface_data.1,
+            awesomeface_data.2,
+        );
 
         let checkerboard = Self::create_checkerboard_texture(8);
         texture_atlas.add_texture(queue, &checkerboard, 8, 8);
@@ -897,29 +2093,19 @@ impl Scene {
             ],
         });
 
-        let pipeline = Self::create_pipeline(device, surface_format, &uniform, &texture_bind_group_layout);
+        let pipeline =
+            Self::create_pipeline(device, surface_format, &uniform, &texture_bind_group_layout);
 
         Self {
             model: nalgebra_glm::Mat4::identity(),
             uniform,
             _texture_atlas: texture_atlas,
-            texture_bind_group,
+            texture_bind_group: Arc::new(texture_bind_group),
             _atlas_regions_buffer: atlas_regions_buffer,
-            pipeline,
-            vertex_buffer,
-            index_buffer,
+            pipeline: Arc::new(pipeline),
+            vertex_buffer: Arc::new(vertex_buffer),
+            index_buffer: Arc::new(index_buffer),
         }
-    }
-
-    pub fn render<'rpass>(&'rpass self, renderpass: &mut wgpu::RenderPass<'rpass>) {
-        renderpass.set_pipeline(&self.pipeline);
-        renderpass.set_bind_group(0, &self.uniform.bind_group, &[]);
-        renderpass.set_bind_group(1, &self.texture_bind_group, &[]);
-
-        renderpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        renderpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-
-        renderpass.draw_indexed(0..(INDICES.len() as _), 0, 0..1);
     }
 
     pub fn update(&mut self, queue: &wgpu::Queue, aspect_ratio: f32, delta_time: f32) {
@@ -1112,7 +2298,7 @@ struct UniformBuffer {
 
 struct UniformBinding {
     pub buffer: wgpu::Buffer,
-    pub bind_group: wgpu::BindGroup,
+    pub bind_group: Arc<wgpu::BindGroup>,
     pub bind_group_layout: wgpu::BindGroupLayout,
 }
 
@@ -1152,7 +2338,7 @@ impl UniformBinding {
 
         Self {
             buffer,
-            bind_group,
+            bind_group: Arc::new(bind_group),
             bind_group_layout,
         }
     }

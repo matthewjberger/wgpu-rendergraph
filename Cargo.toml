@@ -21,6 +21,7 @@ nalgebra-glm = { version = "0.20.0", features = [
     "convert-bytemuck",
     "serde-serialize",
 ] }
+petgraph = "0.6"
 web-time = "1.1.0"
 wgpu = { version = "25.0.2", default-features = false }
 winit = "0.30.12"
