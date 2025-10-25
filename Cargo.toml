@@ -13,6 +13,7 @@ name = "app_core"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 egui = "0.32.3"
 egui-wgpu = { version = "0.32.3", features = ["winit"] }
+egui_tiles = "0.13.0"
 futures = "0.3.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
 kira = "0.10"

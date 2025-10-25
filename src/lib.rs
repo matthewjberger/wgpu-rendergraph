@@ -17,8 +17,90 @@ use winit::{
 use kira::{
     AudioManager, AudioManagerSettings, DefaultBackend, sound::static_sound::StaticSoundData,
 };
+use std::collections::HashMap;
 
-#[derive(Default)]
+struct ViewportPane {
+    name: String,
+}
+
+struct TileTreeBehavior {
+    viewport_dimensions: HashMap<egui_tiles::TileId, (f32, f32)>,
+    viewport_texture_id: Option<egui::TextureId>,
+    max_viewport_size: (f32, f32),
+    add_viewport_requested: bool,
+}
+
+impl egui_tiles::Behavior<ViewportPane> for TileTreeBehavior {
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        egui_tiles::SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            ..Default::default()
+        }
+    }
+
+    fn tab_title_for_pane(&mut self, pane: &ViewportPane) -> egui::WidgetText {
+        pane.name.as_str().into()
+    }
+
+    fn top_bar_right_ui(
+        &mut self,
+        _tiles: &egui_tiles::Tiles<ViewportPane>,
+        ui: &mut egui::Ui,
+        _tile_id: egui_tiles::TileId,
+        _tabs: &egui_tiles::Tabs,
+        _scroll_offset: &mut f32,
+    ) {
+        if ui.button("➕").clicked() {
+            self.add_viewport_requested = true;
+        }
+    }
+
+    fn pane_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _tile_id: egui_tiles::TileId,
+        pane: &mut ViewportPane,
+    ) -> egui_tiles::UiResponse {
+        let available_size = ui.available_size();
+        self.viewport_dimensions
+            .insert(_tile_id, (available_size.x, available_size.y));
+
+        if let Some(texture_id) = self.viewport_texture_id {
+            let max_width = self.max_viewport_size.0;
+            let max_height = self.max_viewport_size.1;
+
+            if max_width > 0.0 && max_height > 0.0 {
+                let u_scale = available_size.x / max_width;
+                let v_scale = available_size.y / max_height;
+
+                let u_offset = (1.0 - u_scale) / 2.0;
+                let v_offset = (1.0 - v_scale) / 2.0;
+
+                let uv = egui::Rect::from_min_max(
+                    egui::pos2(u_offset, v_offset),
+                    egui::pos2(u_offset + u_scale.min(1.0), v_offset + v_scale.min(1.0)),
+                );
+
+                ui.centered_and_justified(|ui| {
+                    ui.add(
+                        egui::Image::new(egui::load::SizedTexture {
+                            id: texture_id,
+                            size: available_size,
+                        })
+                        .uv(uv),
+                    );
+                });
+            }
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.label(format!("Viewport: {}", pane.name));
+            });
+        }
+
+        egui_tiles::UiResponse::None
+    }
+}
+
 pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -28,6 +110,50 @@ pub struct App {
     renderer_receiver: Option<futures::channel::oneshot::Receiver<Renderer>>,
     audio_manager: Option<AudioManager>,
     last_size: (u32, u32),
+    tile_tree: Option<egui_tiles::Tree<ViewportPane>>,
+    tile_tree_behavior: TileTreeBehavior,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        let mut tiles = egui_tiles::Tiles::default();
+
+        let viewport1 = ViewportPane {
+            name: "Viewport 1".to_string(),
+        };
+        let viewport2 = ViewportPane {
+            name: "Viewport 2".to_string(),
+        };
+        let viewport3 = ViewportPane {
+            name: "Viewport 3".to_string(),
+        };
+
+        let pane1 = tiles.insert_pane(viewport1);
+        let pane2 = tiles.insert_pane(viewport2);
+        let pane3 = tiles.insert_pane(viewport3);
+
+        let root = tiles.insert_tab_tile(vec![pane1, pane2, pane3]);
+
+        let tree = egui_tiles::Tree::new("viewport_tree", root, tiles);
+
+        Self {
+            window: None,
+            renderer: None,
+            gui_state: None,
+            last_render_time: None,
+            #[cfg(target_arch = "wasm32")]
+            renderer_receiver: None,
+            audio_manager: None,
+            last_size: (0, 0),
+            tile_tree: Some(tree),
+            tile_tree_behavior: TileTreeBehavior {
+                viewport_dimensions: HashMap::new(),
+                viewport_texture_id: None,
+                max_viewport_size: (0.0, 0.0),
+                add_viewport_requested: false,
+            },
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -321,6 +447,12 @@ impl ApplicationHandler for App {
                 let delta_time = now - *last_render_time;
                 *last_render_time = now;
 
+                self.tile_tree_behavior.viewport_texture_id = renderer.viewport_texture_id();
+                self.tile_tree_behavior.max_viewport_size = (
+                    renderer.gpu.surface_config.width as f32,
+                    renderer.gpu.surface_config.height as f32,
+                );
+
                 let gui_input = gui_state.take_egui_input(window);
                 gui_state.egui_ctx().begin_pass(gui_input);
 
@@ -559,6 +691,51 @@ impl ApplicationHandler for App {
                     egui::TopBottomPanel::bottom("Console").show(gui_state.egui_ctx(), |ui| {
                         ui.heading("Console");
                     });
+
+                    egui::CentralPanel::default().show(gui_state.egui_ctx(), |ui| {
+                        if let Some(tree) = &mut self.tile_tree {
+                            tree.ui(&mut self.tile_tree_behavior, ui);
+                        }
+                    });
+
+                    if self.tile_tree_behavior.add_viewport_requested {
+                        self.tile_tree_behavior.add_viewport_requested = false;
+
+                        if let Some(tree) = &mut self.tile_tree {
+                            let viewport_count = tree
+                                .tiles
+                                .tiles()
+                                .filter(|tile| matches!(tile, egui_tiles::Tile::Pane(_)))
+                                .count();
+
+                            let new_pane = ViewportPane {
+                                name: format!("Viewport {}", viewport_count + 1),
+                            };
+                            let new_tile = tree.tiles.insert_pane(new_pane);
+
+                            if let Some(root) = tree.root() {
+                                if let Some(egui_tiles::Tile::Container(container)) =
+                                    tree.tiles.get_mut(root)
+                                {
+                                    if matches!(container.kind(), egui_tiles::ContainerKind::Tabs) {
+                                        container.add_child(new_tile);
+                                    } else {
+                                        let old_root = root;
+                                        let tabs = egui_tiles::Container::new_tabs(vec![
+                                            old_root, new_tile,
+                                        ]);
+                                        let tabs_id = tree.tiles.insert_container(tabs);
+                                        tree.root = Some(tabs_id);
+                                    }
+                                } else {
+                                    let tabs =
+                                        egui_tiles::Container::new_tabs(vec![root, new_tile]);
+                                    let tabs_id = tree.tiles.insert_container(tabs);
+                                    tree.root = Some(tabs_id);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let egui_winit::egui::FullOutput {
@@ -622,7 +799,12 @@ pub struct Renderer {
     vignette_resource_id: ResourceId,
     grayscale_resource_id: ResourceId,
     color_invert_resource_id: ResourceId,
+    viewport_display_resource_id: ResourceId,
+    viewport_display_texture: wgpu::Texture,
+    viewport_display_view: wgpu::TextureView,
     sharpen_resource_id: ResourceId,
+    egui_output_resource_id: ResourceId,
+    viewport_texture_id: Option<egui::TextureId>,
     _sharpen_uniform_buffer: Arc<wgpu::Buffer>,
 }
 
@@ -981,6 +1163,55 @@ impl Renderer {
             .mip_levels(1)
             .transient();
 
+        let viewport_display_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Viewport Display Texture"),
+            size: wgpu::Extent3d {
+                width: gpu.surface_config.width,
+                height: gpu.surface_config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: gpu.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let viewport_display_view =
+            viewport_display_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &viewport_display_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &vec![0u8; (gpu.surface_config.width * gpu.surface_config.height * 4) as usize],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(gpu.surface_config.width * 4),
+                rows_per_image: Some(gpu.surface_config.height),
+            },
+            wgpu::Extent3d {
+                width: gpu.surface_config.width,
+                height: gpu.surface_config.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let viewport_display_resource_id = graph
+            .add_color_texture("viewport_display")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .external();
+
         let sharpen_resource_id = graph
             .add_color_texture("sharpen")
             .format(gpu.surface_format)
@@ -988,6 +1219,21 @@ impl Renderer {
             .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
             .sample_count(1)
             .mip_levels(1)
+            .transient();
+
+        let egui_output_resource_id = graph
+            .add_color_texture("egui_output")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .clear_color(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            })
             .transient();
 
         let surface_resource_id = graph
@@ -1187,8 +1433,23 @@ impl Renderer {
         );
 
         graph.add_pass(
+            Box::new(BlitPass::new(
+                BlitPassData {
+                    pipeline: Arc::clone(&blit_data.pipeline),
+                    bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
+                    sampler: Arc::clone(&blit_data.sampler),
+                },
+                "blit_to_viewport_display".to_string(),
+            )),
+            &[
+                ("input", color_invert_resource_id),
+                ("output", viewport_display_resource_id),
+            ],
+        );
+
+        graph.add_pass(
             Box::new(EguiPass::new()),
-            &[("color_target", color_invert_resource_id)],
+            &[("color_target", egui_output_resource_id)],
         );
 
         graph.add_pass(
@@ -1201,7 +1462,7 @@ impl Renderer {
                 "blit_to_surface".to_string(),
             )),
             &[
-                ("input", color_invert_resource_id),
+                ("input", egui_output_resource_id),
                 ("output", surface_resource_id),
             ],
         );
@@ -1231,7 +1492,12 @@ impl Renderer {
             vignette_resource_id,
             grayscale_resource_id,
             color_invert_resource_id,
+            viewport_display_resource_id,
+            viewport_display_texture,
+            viewport_display_view,
             sharpen_resource_id,
+            egui_output_resource_id,
+            viewport_texture_id: None,
             _sharpen_uniform_buffer: sharpen_uniform_buffer,
         }
     }
@@ -1356,6 +1622,10 @@ impl Renderer {
         self.pass_configs.color_invert.enabled
     }
 
+    pub fn viewport_texture_id(&self) -> Option<egui::TextureId> {
+        self.viewport_texture_id
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
         self.depth_texture_view = self.gpu.create_depth_texture(width, height);
@@ -1436,6 +1706,65 @@ impl Renderer {
             width,
             height,
         );
+
+        self.render_graph.resize_transient_resource(
+            &self.gpu.device,
+            self.egui_output_resource_id,
+            width,
+            height,
+        );
+
+        self.viewport_display_texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Viewport Display Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.gpu.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        self.viewport_display_view = self
+            .viewport_display_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.viewport_display_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &vec![0u8; (width * height * 4) as usize],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        if let Some(old_texture_id) = self.viewport_texture_id
+            && let Some(renderer) = &mut self.pass_configs.egui.renderer
+        {
+            renderer.free_texture(&old_texture_id);
+            self.viewport_texture_id = Some(renderer.register_native_texture(
+                &self.gpu.device,
+                &self.viewport_display_view,
+                wgpu::FilterMode::Linear,
+            ));
+        }
     }
 
     pub fn render_frame(
@@ -1512,6 +1841,10 @@ impl Renderer {
         self.render_graph
             .resources_mut()
             .set_external_texture(self.depth_resource_id, self.depth_texture_view.clone());
+        self.render_graph.resources_mut().set_external_texture(
+            self.viewport_display_resource_id,
+            self.viewport_display_view.clone(),
+        );
 
         self.pass_configs.egui.paint_jobs = paint_jobs;
         self.pass_configs.egui.screen_descriptor = screen_descriptor;
@@ -1522,6 +1855,16 @@ impl Renderer {
         command_buffers.push(encoder.finish());
 
         self.gpu.queue.submit(command_buffers);
+
+        if self.viewport_texture_id.is_none()
+            && let Some(renderer) = &mut self.pass_configs.egui.renderer
+        {
+            self.viewport_texture_id = Some(renderer.register_native_texture(
+                &self.gpu.device,
+                &self.viewport_display_view,
+                wgpu::FilterMode::Linear,
+            ));
+        }
 
         surface_texture.present();
     }

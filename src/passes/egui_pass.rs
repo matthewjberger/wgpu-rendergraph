@@ -1,4 +1,4 @@
-use wgpu::{LoadOp, Operations, RenderPassColorAttachment};
+use wgpu::{Operations, RenderPassColorAttachment};
 use wgpu_render_graph::{PassExecutionContext, PassNode};
 
 pub struct EguiPass;
@@ -19,11 +19,11 @@ impl PassNode<crate::pass_configs::PassConfigs> for EguiPass {
     }
 
     fn writes(&self) -> Vec<&str> {
-        Vec::new()
+        vec!["color_target"]
     }
 
     fn reads_writes(&self) -> Vec<&str> {
-        vec!["color_target"]
+        Vec::new()
     }
 
     fn execute<'r, 'e>(
@@ -31,7 +31,8 @@ impl PassNode<crate::pass_configs::PassConfigs> for EguiPass {
         context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
     ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
         let config = &context.configs.egui;
-        let (color_view, _, color_store_op) = context.get_color_attachment("color_target");
+        let (color_view, color_load_op, color_store_op) =
+            context.get_color_attachment("color_target");
 
         let render_pass = context
             .encoder
@@ -41,7 +42,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for EguiPass {
                     view: color_view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Load,
+                        load: color_load_op,
                         store: color_store_op,
                     },
                 })],
