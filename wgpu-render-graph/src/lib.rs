@@ -405,15 +405,21 @@ impl Default for RenderGraphResources {
     }
 }
 
-pub struct PassExecutionContext<'a, C = ()> {
-    pub encoder: &'a mut CommandEncoder,
-    pub resources: &'a RenderGraphResources,
-    pub device: &'a Device,
-    slot_mappings: &'a HashMap<String, ResourceId>,
-    pub configs: &'a C,
+pub struct SubGraphRunCommand<'a> {
+    pub sub_graph_name: String,
+    pub inputs: Vec<SlotValue<'a>>,
 }
 
-impl<'a, C> PassExecutionContext<'a, C> {
+pub struct PassExecutionContext<'r, 'e, C = ()> {
+    pub encoder: &'e mut CommandEncoder,
+    pub resources: &'r RenderGraphResources,
+    pub device: &'r Device,
+    slot_mappings: &'r HashMap<String, ResourceId>,
+    pub configs: &'r C,
+    pub(crate) sub_graph_commands: Vec<SubGraphRunCommand<'r>>,
+}
+
+impl<'r, 'e, C> PassExecutionContext<'r, 'e, C> {
     pub fn get_slot(&self, slot: &str) -> ResourceId {
         *self
             .slot_mappings
@@ -421,7 +427,7 @@ impl<'a, C> PassExecutionContext<'a, C> {
             .unwrap_or_else(|| panic!("Slot '{}' not found in pass resource mappings", slot))
     }
 
-    pub fn get_texture_view(&self, slot: &str) -> &'a wgpu::TextureView {
+    pub fn get_texture_view(&self, slot: &str) -> &'r wgpu::TextureView {
         let resource_id = self.get_slot(slot);
         self.resources
             .get_texture_view(resource_id)
@@ -432,7 +438,7 @@ impl<'a, C> PassExecutionContext<'a, C> {
         &self,
         slot: &str,
     ) -> (
-        &'a wgpu::TextureView,
+        &'r wgpu::TextureView,
         wgpu::LoadOp<wgpu::Color>,
         wgpu::StoreOp,
     ) {
@@ -443,9 +449,20 @@ impl<'a, C> PassExecutionContext<'a, C> {
     pub fn get_depth_attachment(
         &self,
         slot: &str,
-    ) -> (&'a wgpu::TextureView, wgpu::LoadOp<f32>, wgpu::StoreOp) {
+    ) -> (&'r wgpu::TextureView, wgpu::LoadOp<f32>, wgpu::StoreOp) {
         let resource_id = self.get_slot(slot);
         self.resources.get_depth_attachment(resource_id)
+    }
+
+    pub fn run_sub_graph(&mut self, sub_graph_name: String, inputs: Vec<SlotValue<'r>>) {
+        self.sub_graph_commands.push(SubGraphRunCommand {
+            sub_graph_name,
+            inputs,
+        });
+    }
+
+    pub fn into_sub_graph_commands(self) -> Vec<SubGraphRunCommand<'r>> {
+        self.sub_graph_commands
     }
 }
 
@@ -458,7 +475,10 @@ pub trait PassNode<C = ()>: Send + Sync {
     }
     fn prepare(&mut self, _device: &Device, _queue: &wgpu::Queue, _configs: &C) {}
     fn invalidate_bind_groups(&mut self) {}
-    fn execute(&mut self, context: PassExecutionContext<C>);
+    fn execute<'r, 'e>(
+        &mut self,
+        context: PassExecutionContext<'r, 'e, C>,
+    ) -> Vec<SubGraphRunCommand<'r>>;
 }
 
 pub struct GraphNode<C> {
@@ -467,6 +487,16 @@ pub struct GraphNode<C> {
     pub writes: Vec<ResourceId>,
     pub reads_writes: Vec<ResourceId>,
     pub pass: Box<dyn PassNode<C>>,
+}
+
+pub enum SlotValue<'a> {
+    TextureView(&'a TextureView),
+    Buffer(&'a Arc<Buffer>),
+}
+
+#[derive(Clone)]
+pub struct SubGraphInputSlot {
+    pub name: String,
 }
 
 pub struct ColorTextureBuilder<'a, C = ()> {
@@ -629,6 +659,8 @@ pub struct RenderGraph<C = ()> {
     graph: DiGraph<GraphNode<C>, ResourceId>,
     pass_nodes: HashMap<String, NodeIndex>,
     pass_resource_mappings: HashMap<String, HashMap<String, ResourceId>>,
+    sub_graphs: HashMap<String, RenderGraph<C>>,
+    sub_graph_inputs: HashMap<String, Vec<SubGraphInputSlot>>,
     resources: RenderGraphResources,
     execution_order: Vec<NodeIndex>,
     store_ops: HashMap<ResourceId, StoreOp>,
@@ -645,6 +677,8 @@ impl<C> RenderGraph<C> {
             graph: DiGraph::new(),
             pass_nodes: HashMap::new(),
             pass_resource_mappings: HashMap::new(),
+            sub_graphs: HashMap::new(),
+            sub_graph_inputs: HashMap::new(),
             resources: RenderGraphResources::new(),
             execution_order: Vec::new(),
             store_ops: HashMap::new(),
@@ -711,6 +745,24 @@ impl<C> RenderGraph<C> {
         self.pass_resource_mappings.insert(name, mappings);
         self.needs_recompile = true;
         index
+    }
+
+    pub fn add_sub_graph(
+        &mut self,
+        name: String,
+        sub_graph: RenderGraph<C>,
+        input_slots: Vec<SubGraphInputSlot>,
+    ) {
+        self.sub_graphs.insert(name.clone(), sub_graph);
+        self.sub_graph_inputs.insert(name, input_slots);
+    }
+
+    pub fn get_sub_graph(&self, name: &str) -> Option<&RenderGraph<C>> {
+        self.sub_graphs.get(name)
+    }
+
+    pub fn get_sub_graph_mut(&mut self, name: &str) -> Option<&mut RenderGraph<C>> {
+        self.sub_graphs.get_mut(name)
     }
 
     pub fn add_color_texture(&mut self, name: &str) -> ColorTextureBuilder<'_, C> {
@@ -1156,7 +1208,7 @@ impl<C> RenderGraph<C> {
             node.pass.prepare(device, queue, configs);
         }
 
-        self.execute_serial(device, configs)
+        self.execute_serial(device, queue, configs)
     }
 
     fn invalidate_bind_groups_for_changed_resources(&mut self) {
@@ -1204,10 +1256,17 @@ impl<C> RenderGraph<C> {
         }
     }
 
-    fn execute_serial(&mut self, device: &Device, configs: &C) -> Vec<CommandBuffer> {
+    fn execute_serial(
+        &mut self,
+        device: &Device,
+        queue: &wgpu::Queue,
+        configs: &C,
+    ) -> Vec<CommandBuffer> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("RenderGraph Serial Encoder"),
         });
+
+        let mut command_buffers = Vec::new();
 
         for &node_index in &self.execution_order {
             if self.culled_passes.contains(&node_index) {
@@ -1219,17 +1278,79 @@ impl<C> RenderGraph<C> {
                 .pass_resource_mappings
                 .get(&node.name)
                 .expect("Pass resource mappings not found");
-            let context = PassExecutionContext {
-                encoder: &mut encoder,
-                resources: &self.resources,
-                device,
-                slot_mappings,
-                configs,
+
+            let sub_graph_commands = {
+                let context = PassExecutionContext {
+                    encoder: &mut encoder,
+                    resources: &self.resources,
+                    device,
+                    slot_mappings,
+                    configs,
+                    sub_graph_commands: Vec::new(),
+                };
+
+                node.pass.execute(context)
             };
-            node.pass.execute(context);
+
+            for command in sub_graph_commands {
+                command_buffers.push(encoder.finish());
+
+                if let Some(sub_graph) = self.sub_graphs.get_mut(&command.sub_graph_name) {
+                    let input_slots = self
+                        .sub_graph_inputs
+                        .get(&command.sub_graph_name)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    for (index, slot_value) in command.inputs.iter().enumerate() {
+                        if let Some(input_slot) = input_slots.get(index) {
+                            match slot_value {
+                                SlotValue::TextureView(view) => {
+                                    if let Some(resource_id) = sub_graph
+                                        .resources
+                                        .descriptors
+                                        .iter()
+                                        .find(|(_, desc)| {
+                                            desc.name == input_slot.name && desc.is_external
+                                        })
+                                        .map(|(id, _)| *id)
+                                    {
+                                        sub_graph
+                                            .resources
+                                            .set_external_texture(resource_id, (*view).clone());
+                                    }
+                                }
+                                SlotValue::Buffer(buffer) => {
+                                    if let Some(resource_id) = sub_graph
+                                        .resources
+                                        .descriptors
+                                        .iter()
+                                        .find(|(_, desc)| {
+                                            desc.name == input_slot.name && desc.is_external
+                                        })
+                                        .map(|(id, _)| *id)
+                                    {
+                                        sub_graph
+                                            .resources
+                                            .set_external_buffer(resource_id, (*buffer).clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let sub_graph_buffers = sub_graph.execute(device, queue, configs);
+                    command_buffers.extend(sub_graph_buffers);
+                }
+
+                encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("RenderGraph Serial Encoder"),
+                });
+            }
         }
 
-        vec![encoder.finish()]
+        command_buffers.push(encoder.finish());
+        command_buffers
     }
 
     pub fn resources_mut(&mut self) -> &mut RenderGraphResources {

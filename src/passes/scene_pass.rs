@@ -37,7 +37,10 @@ impl PassNode<crate::pass_configs::PassConfigs> for ScenePass {
         vec!["color_output", "depth_output"]
     }
 
-    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
+    fn execute<'r, 'e>(
+        &mut self,
+        context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
+    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
         let (color_view, color_load_op, color_store_op) =
             context.get_color_attachment("color_output");
         let (depth_view, depth_load_op, depth_store_op) =
@@ -73,5 +76,8 @@ impl PassNode<crate::pass_configs::PassConfigs> for ScenePass {
         render_pass.set_vertex_buffer(0, self.data.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.data.index_buffer.slice(..), IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.data.index_count, 0, 0..1);
+        drop(render_pass);
+
+        context.into_sub_graph_commands()
     }
 }

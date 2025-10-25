@@ -187,7 +187,10 @@ impl PassNode<PassConfigs> for BrightnessContrastPass {
         self.cached_bind_group_without_uniforms = None;
     }
 
-    fn execute(&mut self, context: PassExecutionContext<PassConfigs>) {
+    fn execute<'r, 'e>(
+        &mut self,
+        context: PassExecutionContext<'r, 'e, PassConfigs>,
+    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
         let config = &context.configs.brightness_contrast;
 
         if self.cached_bind_group_with_uniforms.is_none() {
@@ -274,5 +277,9 @@ impl PassNode<PassConfigs> for BrightnessContrastPass {
         render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..3, 0..1);
+
+        drop(render_pass);
+
+        context.into_sub_graph_commands()
     }
 }

@@ -26,7 +26,10 @@ impl PassNode<crate::pass_configs::PassConfigs> for EguiPass {
         vec!["color_target"]
     }
 
-    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
+    fn execute<'r, 'e>(
+        &mut self,
+        context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
+    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
         let config = &context.configs.egui;
         let (color_view, _, color_store_op) = context.get_color_attachment("color_target");
 
@@ -55,5 +58,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for EguiPass {
                 &config.screen_descriptor,
             );
         }
+
+        context.into_sub_graph_commands()
     }
 }

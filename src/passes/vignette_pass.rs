@@ -190,7 +190,10 @@ impl PassNode<crate::pass_configs::PassConfigs> for VignettePass {
         self.cached_bind_group_without_vignette = None;
     }
 
-    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
+    fn execute<'r, 'e>(
+        &mut self,
+        context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
+    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
         if self.cached_bind_group_with_vignette.is_none() {
             let input_view = context.get_texture_view("input");
 
@@ -276,5 +279,8 @@ impl PassNode<crate::pass_configs::PassConfigs> for VignettePass {
         render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..3, 0..1);
+        drop(render_pass);
+
+        context.into_sub_graph_commands()
     }
 }

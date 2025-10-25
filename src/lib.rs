@@ -324,14 +324,14 @@ impl ApplicationHandler for App {
                 let gui_input = gui_state.take_egui_input(window);
                 gui_state.egui_ctx().begin_pass(gui_input);
 
-                #[cfg(not(target_arch = "wasm32"))]
-                let title = "Rust/Wgpu";
-
-                #[cfg(feature = "webgpu")]
-                let title = "Rust/Wgpu/Webgpu";
-
                 #[cfg(feature = "webgl")]
                 let title = "Rust/Wgpu/Webgl";
+
+                #[cfg(all(feature = "webgpu", not(feature = "webgl")))]
+                let title = "Rust/Wgpu/Webgpu";
+
+                #[cfg(all(not(feature = "webgpu"), not(feature = "webgl")))]
+                let title = "Rust/Wgpu";
 
                 {
                     egui::TopBottomPanel::top("top").show(gui_state.egui_ctx(), |ui| {
