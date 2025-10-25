@@ -1,9 +1,9 @@
-use crate::render_graph::{PassExecutionContext, PassNode, ResourceId};
 use std::sync::Arc;
 use wgpu::{
     BindGroup, Buffer, IndexFormat, Operations, RenderPassColorAttachment,
     RenderPassDepthStencilAttachment, RenderPipeline,
 };
+use wgpu_render_graph::{PassExecutionContext, PassNode};
 
 pub struct ScenePassData {
     pub pipeline: Arc<RenderPipeline>,
@@ -16,42 +16,32 @@ pub struct ScenePassData {
 
 pub struct ScenePass {
     pub data: ScenePassData,
-    color_output: ResourceId,
-    depth_output: ResourceId,
 }
 
 impl ScenePass {
-    pub fn new(data: ScenePassData, color_output: ResourceId, depth_output: ResourceId) -> Self {
-        Self {
-            data,
-            color_output,
-            depth_output,
-        }
+    pub fn new(data: ScenePassData) -> Self {
+        Self { data }
     }
 }
 
-impl PassNode for ScenePass {
+impl PassNode<crate::pass_configs::PassConfigs> for ScenePass {
     fn name(&self) -> &str {
         "scene_pass"
     }
 
-    fn reads(&self) -> Vec<ResourceId> {
+    fn reads(&self) -> Vec<&str> {
         vec![]
     }
 
-    fn writes(&self) -> Vec<ResourceId> {
-        vec![self.color_output, self.depth_output]
+    fn writes(&self) -> Vec<&str> {
+        vec!["color_output", "depth_output"]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn execute(&mut self, context: PassExecutionContext) {
+    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
         let (color_view, color_load_op, color_store_op) =
-            context.resources.get_color_attachment(self.color_output);
+            context.get_color_attachment("color_output");
         let (depth_view, depth_load_op, depth_store_op) =
-            context.resources.get_depth_attachment(self.depth_output);
+            context.get_depth_attachment("depth_output");
 
         let mut render_pass = context
             .encoder

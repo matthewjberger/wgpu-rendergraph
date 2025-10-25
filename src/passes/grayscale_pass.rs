@@ -1,9 +1,9 @@
 use super::shader_common::FULLSCREEN_VERTEX_SHADER;
-use crate::render_graph::{PassExecutionContext, PassNode, ResourceId};
 use std::sync::Arc;
 use wgpu::{
     BindGroup, BindGroupLayout, Operations, RenderPassColorAttachment, RenderPipeline, Sampler,
 };
+use wgpu_render_graph::{PassExecutionContext, PassNode};
 
 const GRAYSCALE_FRAGMENT_SHADER: &str = "
 @group(0) @binding(0)
@@ -29,36 +29,17 @@ pub struct GrayscalePassData {
 
 pub struct GrayscalePass {
     pub data: GrayscalePassData,
-    input: ResourceId,
-    output: ResourceId,
     cached_bind_group_with_grayscale: Option<BindGroup>,
     cached_bind_group_without_grayscale: Option<BindGroup>,
-    enabled: bool,
 }
 
 impl GrayscalePass {
-    pub fn new(data: GrayscalePassData, input: ResourceId, output: ResourceId) -> Self {
+    pub fn new(data: GrayscalePassData) -> Self {
         Self {
             data,
-            input,
-            output,
             cached_bind_group_with_grayscale: None,
             cached_bind_group_without_grayscale: None,
-            enabled: false,
         }
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn invalidate_bind_groups(&mut self) {
-        self.cached_bind_group_with_grayscale = None;
-        self.cached_bind_group_without_grayscale = None;
     }
 
     pub fn create_pipeline(
@@ -145,29 +126,27 @@ impl GrayscalePass {
     }
 }
 
-impl PassNode for GrayscalePass {
+impl PassNode<crate::pass_configs::PassConfigs> for GrayscalePass {
     fn name(&self) -> &str {
         "grayscale_pass"
     }
 
-    fn reads(&self) -> Vec<ResourceId> {
-        vec![self.input]
+    fn reads(&self) -> Vec<&str> {
+        vec!["input"]
     }
 
-    fn writes(&self) -> Vec<ResourceId> {
-        vec![self.output]
+    fn writes(&self) -> Vec<&str> {
+        vec!["output"]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+    fn invalidate_bind_groups(&mut self) {
+        self.cached_bind_group_with_grayscale = None;
+        self.cached_bind_group_without_grayscale = None;
     }
 
-    fn execute(&mut self, context: PassExecutionContext) {
+    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
         if self.cached_bind_group_with_grayscale.is_none() {
-            let input_view = context
-                .resources
-                .get_texture_view(self.input)
-                .expect("Input texture not allocated");
+            let input_view = context.get_texture_view("input");
 
             self.cached_bind_group_with_grayscale = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -188,10 +167,7 @@ impl PassNode for GrayscalePass {
         }
 
         if self.cached_bind_group_without_grayscale.is_none() {
-            let input_view = context
-                .resources
-                .get_texture_view(self.input)
-                .expect("Input texture not allocated");
+            let input_view = context.get_texture_view("input");
 
             self.cached_bind_group_without_grayscale = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -211,13 +187,13 @@ impl PassNode for GrayscalePass {
             ));
         }
 
-        let (color_view, color_load_op, color_store_op) =
-            context.resources.get_color_attachment(self.output);
+        let config = &context.configs.grayscale;
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
 
         let mut render_pass = context
             .encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: if self.enabled {
+                label: if config.enabled {
                     Some("Grayscale Render Pass")
                 } else {
                     Some("Passthrough Blit Render Pass")
@@ -235,7 +211,7 @@ impl PassNode for GrayscalePass {
                 occlusion_query_set: None,
             });
 
-        let (pipeline, bind_group) = if self.enabled {
+        let (pipeline, bind_group) = if config.enabled {
             (
                 &self.data.pipeline,
                 self.cached_bind_group_with_grayscale.as_ref().unwrap(),

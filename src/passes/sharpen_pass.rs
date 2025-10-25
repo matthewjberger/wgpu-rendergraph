@@ -1,82 +1,71 @@
+use super::shader_common::FULLSCREEN_VERTEX_SHADER;
 use std::sync::Arc;
 use wgpu::{
     BindGroup, BindGroupLayout, Operations, RenderPassColorAttachment, RenderPipeline, Sampler,
 };
 use wgpu_render_graph::{PassExecutionContext, PassNode};
 
-const EDGE_DETECTION_SHADER: &str = "
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    var out: VertexOutput;
-    let x = f32((vertex_index & 1u) << 1u);
-    let y = f32((vertex_index & 2u));
-    out.position = vec4<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
-    out.uv = vec2<f32>(x, 1.0 - y);
-    return out;
-}
-
+const SHARPEN_FRAGMENT_SHADER: &str = "
 @group(0) @binding(0)
 var input_texture: texture_2d<f32>;
 
 @group(0) @binding(1)
 var input_sampler: sampler;
 
-fn luminance(color: vec3<f32>) -> f32 {
-    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
-}
+struct SharpenUniforms {
+    strength: f32,
+    padding1: f32,
+    padding2: f32,
+    padding3: f32,
+};
+
+@group(0) @binding(2)
+var<uniform> uniforms: SharpenUniforms;
 
 @fragment
 fn fragment_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let texture_size = textureDimensions(input_texture);
-    let texel_size = vec2<f32>(1.0 / f32(texture_size.x), 1.0 / f32(texture_size.y));
+    let tex_size = textureDimensions(input_texture);
+    let texel_size = vec2<f32>(1.0 / f32(tex_size.x), 1.0 / f32(tex_size.y));
 
-    let tl = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(-texel_size.x, -texel_size.y)).rgb);
-    let tm = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(0.0, -texel_size.y)).rgb);
-    let tr = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(texel_size.x, -texel_size.y)).rgb);
+    let center = textureSample(input_texture, input_sampler, in.uv).rgb;
 
-    let ml = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(-texel_size.x, 0.0)).rgb);
-    let mr = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(texel_size.x, 0.0)).rgb);
+    var laplacian = center * 8.0;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(-texel_size.x, 0.0)).rgb;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(texel_size.x, 0.0)).rgb;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(0.0, -texel_size.y)).rgb;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(0.0, texel_size.y)).rgb;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(-texel_size.x, -texel_size.y)).rgb;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(texel_size.x, -texel_size.y)).rgb;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(-texel_size.x, texel_size.y)).rgb;
+    laplacian -= textureSample(input_texture, input_sampler, in.uv + vec2<f32>(texel_size.x, texel_size.y)).rgb;
 
-    let bl = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(-texel_size.x, texel_size.y)).rgb);
-    let bm = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(0.0, texel_size.y)).rgb);
-    let br = luminance(textureSample(input_texture, input_sampler, in.uv + vec2<f32>(texel_size.x, texel_size.y)).rgb);
+    let sharpened = center + laplacian * uniforms.strength;
 
-    let gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
-    let gy = -tl - 2.0 * tm - tr + bl + 2.0 * bm + br;
-
-    let edge_strength = sqrt(gx * gx + gy * gy);
-
-    let original = textureSample(input_texture, input_sampler, in.uv).rgb;
-    let edge_color = vec3<f32>(edge_strength);
-
-    let result = mix(original, edge_color, 0.7);
-
-    return vec4<f32>(result, 1.0);
+    return vec4<f32>(clamp(sharpened, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 ";
 
-pub struct EdgeDetectionPassData {
+pub struct SharpenPassData {
     pub pipeline: Arc<RenderPipeline>,
     pub blit_pipeline: Arc<RenderPipeline>,
     pub bind_group_layout: Arc<BindGroupLayout>,
     pub sampler: Arc<Sampler>,
 }
 
-pub struct EdgeDetectionPass {
-    pub data: EdgeDetectionPassData,
-    cached_bind_group: Option<BindGroup>,
+pub struct SharpenPass {
+    pub data: SharpenPassData,
+    cached_bind_group_with_sharpen: Option<BindGroup>,
+    cached_bind_group_without_sharpen: Option<BindGroup>,
+    uniform_buffer: Arc<wgpu::Buffer>,
 }
 
-impl EdgeDetectionPass {
-    pub fn new(data: EdgeDetectionPassData) -> Self {
+impl SharpenPass {
+    pub fn new(data: SharpenPassData, uniform_buffer: Arc<wgpu::Buffer>) -> Self {
         Self {
             data,
-            cached_bind_group: None,
+            cached_bind_group_with_sharpen: None,
+            cached_bind_group_without_sharpen: None,
+            uniform_buffer,
         }
     }
 
@@ -84,13 +73,15 @@ impl EdgeDetectionPass {
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
     ) -> (Arc<RenderPipeline>, Arc<BindGroupLayout>) {
+        let shader_source = format!("{}\n{}", FULLSCREEN_VERTEX_SHADER, SHARPEN_FRAGMENT_SHADER);
+
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Edge Detection Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(EDGE_DETECTION_SHADER)),
+            label: Some("Sharpen Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(shader_source)),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Edge Detection Bind Group Layout"),
+            label: Some("Sharpen Bind Group Layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -108,17 +99,27 @@ impl EdgeDetectionPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Edge Detection Pipeline Layout"),
+            label: Some("Sharpen Pipeline Layout"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Edge Detection Pipeline"),
+            label: Some("Sharpen Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader_module,
@@ -159,9 +160,9 @@ impl EdgeDetectionPass {
     }
 }
 
-impl PassNode<crate::pass_configs::PassConfigs> for EdgeDetectionPass {
+impl PassNode<crate::pass_configs::PassConfigs> for SharpenPass {
     fn name(&self) -> &str {
-        "edge_detection_pass"
+        "sharpen_pass"
     }
 
     fn reads(&self) -> Vec<&str> {
@@ -172,18 +173,55 @@ impl PassNode<crate::pass_configs::PassConfigs> for EdgeDetectionPass {
         vec!["output"]
     }
 
+    fn prepare(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        configs: &crate::pass_configs::PassConfigs,
+    ) {
+        let config = &configs.sharpen;
+        let uniform_data = [config.strength, 0.0, 0.0, 0.0];
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&uniform_data));
+    }
+
     fn invalidate_bind_groups(&mut self) {
-        self.cached_bind_group = None;
+        self.cached_bind_group_with_sharpen = None;
+        self.cached_bind_group_without_sharpen = None;
     }
 
     fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
-        if self.cached_bind_group.is_none() {
+        if self.cached_bind_group_with_sharpen.is_none() {
             let input_view = context.get_texture_view("input");
 
-            self.cached_bind_group = Some(context.device.create_bind_group(
+            self.cached_bind_group_with_sharpen = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
-                    label: Some("Edge Detection Bind Group"),
+                    label: Some("Sharpen Bind Group"),
                     layout: &self.data.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(input_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.data.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                },
+            ));
+        }
+
+        if self.cached_bind_group_without_sharpen.is_none() {
+            let input_view = context.get_texture_view("input");
+
+            self.cached_bind_group_without_sharpen = Some(context.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("Blit Bind Group (for disabled sharpen)"),
+                    layout: &self.data.blit_pipeline.get_bind_group_layout(0),
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
@@ -198,14 +236,14 @@ impl PassNode<crate::pass_configs::PassConfigs> for EdgeDetectionPass {
             ));
         }
 
-        let config = &context.configs.edge_detection;
+        let config = &context.configs.sharpen;
         let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
 
         let mut render_pass = context
             .encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: if config.enabled {
-                    Some("Edge Detection Render Pass")
+                    Some("Sharpen Render Pass")
                 } else {
                     Some("Passthrough Blit Render Pass")
                 },
@@ -222,14 +260,20 @@ impl PassNode<crate::pass_configs::PassConfigs> for EdgeDetectionPass {
                 occlusion_query_set: None,
             });
 
-        let pipeline = if config.enabled {
-            &self.data.pipeline
+        let (pipeline, bind_group) = if config.enabled {
+            (
+                &self.data.pipeline,
+                self.cached_bind_group_with_sharpen.as_ref().unwrap(),
+            )
         } else {
-            &self.data.blit_pipeline
+            (
+                &self.data.blit_pipeline,
+                self.cached_bind_group_without_sharpen.as_ref().unwrap(),
+            )
         };
 
         render_pass.set_pipeline(pipeline);
-        render_pass.set_bind_group(0, self.cached_bind_group.as_ref().unwrap(), &[]);
+        render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..3, 0..1);
     }
 }

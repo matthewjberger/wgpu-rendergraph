@@ -1,8 +1,8 @@
-use crate::render_graph::{PassExecutionContext, PassNode, ResourceId};
 use std::sync::Arc;
 use wgpu::{
     BindGroup, BindGroupLayout, Operations, RenderPassColorAttachment, RenderPipeline, Sampler,
 };
+use wgpu_render_graph::{PassExecutionContext, PassNode};
 
 const BLUR_SHADER: &str = "
 struct VertexOutput {
@@ -61,48 +61,19 @@ pub struct GaussianBlurPassData {
 
 pub struct GaussianBlurHorizontalPass {
     pub data: GaussianBlurPassData,
-    input: ResourceId,
-    output: ResourceId,
     cached_bind_group_with_blur: Option<BindGroup>,
     cached_bind_group_without_blur: Option<BindGroup>,
     uniform_buffer: Arc<wgpu::Buffer>,
-    enabled: bool,
 }
 
 impl GaussianBlurHorizontalPass {
-    pub fn new(
-        data: GaussianBlurPassData,
-        input: ResourceId,
-        output: ResourceId,
-        uniform_buffer: Arc<wgpu::Buffer>,
-    ) -> Self {
+    pub fn new(data: GaussianBlurPassData, uniform_buffer: Arc<wgpu::Buffer>) -> Self {
         Self {
             data,
-            input,
-            output,
             cached_bind_group_with_blur: None,
             cached_bind_group_without_blur: None,
             uniform_buffer,
-            enabled: false,
         }
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn update_uniforms(&self, queue: &wgpu::Queue) {
-        let direction = [1.0f32, 0.0f32];
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&direction));
-    }
-
-    pub fn invalidate_bind_groups(&mut self) {
-        self.cached_bind_group_with_blur = None;
-        self.cached_bind_group_without_blur = None;
     }
 
     pub fn create_pipeline(
@@ -194,29 +165,37 @@ impl GaussianBlurHorizontalPass {
     }
 }
 
-impl PassNode for GaussianBlurHorizontalPass {
+impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurHorizontalPass {
     fn name(&self) -> &str {
         "gaussian_blur_horizontal_pass"
     }
 
-    fn reads(&self) -> Vec<ResourceId> {
-        vec![self.input]
+    fn reads(&self) -> Vec<&str> {
+        vec!["input"]
     }
 
-    fn writes(&self) -> Vec<ResourceId> {
-        vec![self.output]
+    fn writes(&self) -> Vec<&str> {
+        vec!["output"]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+    fn prepare(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _configs: &crate::pass_configs::PassConfigs,
+    ) {
+        let direction = [1.0f32, 0.0f32];
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&direction));
     }
 
-    fn execute(&mut self, context: PassExecutionContext) {
+    fn invalidate_bind_groups(&mut self) {
+        self.cached_bind_group_with_blur = None;
+        self.cached_bind_group_without_blur = None;
+    }
+
+    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
         if self.cached_bind_group_with_blur.is_none() {
-            let input_view = context
-                .resources
-                .get_texture_view(self.input)
-                .expect("Input texture not allocated");
+            let input_view = context.get_texture_view("input");
 
             self.cached_bind_group_with_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -241,10 +220,7 @@ impl PassNode for GaussianBlurHorizontalPass {
         }
 
         if self.cached_bind_group_without_blur.is_none() {
-            let input_view = context
-                .resources
-                .get_texture_view(self.input)
-                .expect("Input texture not allocated");
+            let input_view = context.get_texture_view("input");
 
             self.cached_bind_group_without_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -264,13 +240,13 @@ impl PassNode for GaussianBlurHorizontalPass {
             ));
         }
 
-        let (color_view, color_load_op, color_store_op) =
-            context.resources.get_color_attachment(self.output);
+        let config = &context.configs.gaussian_blur;
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
 
         let mut render_pass = context
             .encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: if self.enabled {
+                label: if config.enabled {
                     Some("Gaussian Blur Horizontal Render Pass")
                 } else {
                     Some("Passthrough Blit Render Pass")
@@ -288,7 +264,7 @@ impl PassNode for GaussianBlurHorizontalPass {
                 occlusion_query_set: None,
             });
 
-        let (pipeline, bind_group) = if self.enabled {
+        let (pipeline, bind_group) = if config.enabled {
             (
                 &self.data.pipeline,
                 self.cached_bind_group_with_blur.as_ref().unwrap(),
@@ -308,70 +284,53 @@ impl PassNode for GaussianBlurHorizontalPass {
 
 pub struct GaussianBlurVerticalPass {
     pub data: GaussianBlurPassData,
-    input: ResourceId,
-    output: ResourceId,
     cached_bind_group_with_blur: Option<BindGroup>,
     cached_bind_group_without_blur: Option<BindGroup>,
     uniform_buffer: Arc<wgpu::Buffer>,
-    enabled: bool,
 }
 
 impl GaussianBlurVerticalPass {
-    pub fn new(
-        data: GaussianBlurPassData,
-        input: ResourceId,
-        output: ResourceId,
-        uniform_buffer: Arc<wgpu::Buffer>,
-    ) -> Self {
+    pub fn new(data: GaussianBlurPassData, uniform_buffer: Arc<wgpu::Buffer>) -> Self {
         Self {
             data,
-            input,
-            output,
             cached_bind_group_with_blur: None,
             cached_bind_group_without_blur: None,
             uniform_buffer,
-            enabled: false,
         }
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    pub fn update_uniforms(&self, queue: &wgpu::Queue) {
-        let direction = [0.0f32, 1.0f32];
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&direction));
-    }
-
-    pub fn invalidate_bind_groups(&mut self) {
-        self.cached_bind_group_with_blur = None;
-        self.cached_bind_group_without_blur = None;
     }
 }
 
-impl PassNode for GaussianBlurVerticalPass {
+impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurVerticalPass {
     fn name(&self) -> &str {
         "gaussian_blur_vertical_pass"
     }
 
-    fn reads(&self) -> Vec<ResourceId> {
-        vec![self.input]
+    fn reads(&self) -> Vec<&str> {
+        vec!["input"]
     }
 
-    fn writes(&self) -> Vec<ResourceId> {
-        vec![self.output]
+    fn writes(&self) -> Vec<&str> {
+        vec!["output"]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+    fn prepare(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _configs: &crate::pass_configs::PassConfigs,
+    ) {
+        let direction = [0.0f32, 1.0f32];
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&direction));
     }
 
-    fn execute(&mut self, context: PassExecutionContext) {
+    fn invalidate_bind_groups(&mut self) {
+        self.cached_bind_group_with_blur = None;
+        self.cached_bind_group_without_blur = None;
+    }
+
+    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
         if self.cached_bind_group_with_blur.is_none() {
-            let input_view = context
-                .resources
-                .get_texture_view(self.input)
-                .expect("Input texture not allocated");
+            let input_view = context.get_texture_view("input");
 
             self.cached_bind_group_with_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -396,10 +355,7 @@ impl PassNode for GaussianBlurVerticalPass {
         }
 
         if self.cached_bind_group_without_blur.is_none() {
-            let input_view = context
-                .resources
-                .get_texture_view(self.input)
-                .expect("Input texture not allocated");
+            let input_view = context.get_texture_view("input");
 
             self.cached_bind_group_without_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -419,13 +375,13 @@ impl PassNode for GaussianBlurVerticalPass {
             ));
         }
 
-        let (color_view, color_load_op, color_store_op) =
-            context.resources.get_color_attachment(self.output);
+        let config = &context.configs.gaussian_blur;
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
 
         let mut render_pass = context
             .encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: if self.enabled {
+                label: if config.enabled {
                     Some("Gaussian Blur Vertical Render Pass")
                 } else {
                     Some("Passthrough Blit Render Pass")
@@ -443,7 +399,7 @@ impl PassNode for GaussianBlurVerticalPass {
                 occlusion_query_set: None,
             });
 
-        let (pipeline, bind_group) = if self.enabled {
+        let (pipeline, bind_group) = if config.enabled {
             (
                 &self.data.pipeline,
                 self.cached_bind_group_with_blur.as_ref().unwrap(),

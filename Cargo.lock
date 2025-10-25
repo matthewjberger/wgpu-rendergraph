@@ -170,12 +170,12 @@ dependencies = [
  "kira",
  "log",
  "nalgebra-glm",
- "petgraph",
  "pollster",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
  "wgpu",
+ "wgpu-render-graph",
  "winit",
 ]
 
@@ -3554,6 +3554,14 @@ dependencies = [
  "wgpu-types",
  "windows 0.58.0",
  "windows-core 0.58.0",
+]
+
+[[package]]
+name = "wgpu-render-graph"
+version = "0.1.0"
+dependencies = [
+ "petgraph",
+ "wgpu",
 ]
 
 [[package]]

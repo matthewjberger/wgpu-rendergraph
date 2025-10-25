@@ -1,9 +1,9 @@
 use super::shader_common::FULLSCREEN_VERTEX_SHADER;
-use crate::render_graph::{PassExecutionContext, PassNode, ResourceId};
 use std::sync::Arc;
 use wgpu::{
     BindGroup, BindGroupLayout, Operations, RenderPassColorAttachment, RenderPipeline, Sampler,
 };
+use wgpu_render_graph::{PassExecutionContext, PassNode};
 
 const BLIT_FRAGMENT_SHADER: &str = "
 @group(0) @binding(0)
@@ -27,24 +27,16 @@ pub struct BlitPassData {
 pub struct BlitPass {
     pub data: BlitPassData,
     name: String,
-    input: ResourceId,
-    output: ResourceId,
     cached_bind_group: Option<BindGroup>,
 }
 
 impl BlitPass {
-    pub fn new(data: BlitPassData, name: String, input: ResourceId, output: ResourceId) -> Self {
+    pub fn new(data: BlitPassData, name: String) -> Self {
         Self {
             data,
             name,
-            input,
-            output,
             cached_bind_group: None,
         }
-    }
-
-    pub fn invalidate_bind_group(&mut self) {
-        self.cached_bind_group = None;
     }
 
     pub fn create_pipeline(
@@ -128,29 +120,26 @@ impl BlitPass {
     }
 }
 
-impl PassNode for BlitPass {
+impl PassNode<crate::pass_configs::PassConfigs> for BlitPass {
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn reads(&self) -> Vec<ResourceId> {
-        vec![self.input]
+    fn reads(&self) -> Vec<&str> {
+        vec!["input"]
     }
 
-    fn writes(&self) -> Vec<ResourceId> {
-        vec![self.output]
+    fn writes(&self) -> Vec<&str> {
+        vec!["output"]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+    fn invalidate_bind_groups(&mut self) {
+        self.cached_bind_group = None;
     }
 
-    fn execute(&mut self, context: PassExecutionContext) {
+    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
         if self.cached_bind_group.is_none() {
-            let input_view = context
-                .resources
-                .get_texture_view(self.input)
-                .expect("Input texture not allocated");
+            let input_view = context.get_texture_view("input");
 
             self.cached_bind_group = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -170,8 +159,7 @@ impl PassNode for BlitPass {
             ));
         }
 
-        let (color_view, color_load_op, color_store_op) =
-            context.resources.get_color_attachment(self.output);
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
 
         let mut render_pass = context
             .encoder

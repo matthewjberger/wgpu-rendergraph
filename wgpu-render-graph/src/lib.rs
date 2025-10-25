@@ -1,12 +1,10 @@
-#![allow(dead_code)]
-
 use petgraph::graph::{DiGraph, NodeIndex};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use wgpu::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, Extent3d, StoreOp, Texture,
-    TextureDescriptor, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    Buffer, BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoder, Device, Extent3d,
+    StoreOp, Texture, TextureDescriptor, TextureFormat, TextureUsages, TextureView,
+    TextureViewDescriptor,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,42 +92,6 @@ pub struct ResourceDescriptor {
     pub is_external: bool,
 }
 
-impl ResourceDescriptor {
-    pub fn color_load_op(&self) -> wgpu::LoadOp<wgpu::Color> {
-        match &self.resource_type {
-            ResourceType::ExternalColor { clear_color }
-            | ResourceType::TransientColor { clear_color, .. } => {
-                if let Some(color) = clear_color {
-                    wgpu::LoadOp::Clear(*color)
-                } else {
-                    wgpu::LoadOp::Load
-                }
-            }
-            _ => panic!(
-                "color_load_op called on non-color texture resource '{}'",
-                self.name
-            ),
-        }
-    }
-
-    pub fn depth_load_op(&self) -> wgpu::LoadOp<f32> {
-        match &self.resource_type {
-            ResourceType::ExternalDepth { clear_depth }
-            | ResourceType::TransientDepth { clear_depth, .. } => {
-                if let Some(depth) = clear_depth {
-                    wgpu::LoadOp::Clear(*depth)
-                } else {
-                    wgpu::LoadOp::Load
-                }
-            }
-            _ => panic!(
-                "depth_load_op called on non-depth texture resource '{}'",
-                self.name
-            ),
-        }
-    }
-}
-
 pub enum ResourceHandle {
     ExternalTexture {
         view: TextureView,
@@ -157,22 +119,6 @@ impl ResourceHandle {
         }
     }
 
-    pub fn texture(&self) -> Option<&Arc<Texture>> {
-        match self {
-            ResourceHandle::ExternalTexture { .. } => None,
-            ResourceHandle::TransientTexture { texture, .. } => Some(texture),
-            _ => None,
-        }
-    }
-
-    pub fn buffer(&self) -> Option<&Arc<Buffer>> {
-        match self {
-            ResourceHandle::ExternalBuffer { buffer } => Some(buffer),
-            ResourceHandle::TransientBuffer { buffer } => Some(buffer),
-            _ => None,
-        }
-    }
-
     pub fn store_op(&self) -> StoreOp {
         match self {
             ResourceHandle::ExternalTexture { store_op, .. } => *store_op,
@@ -185,6 +131,7 @@ impl ResourceHandle {
 pub struct RenderGraphResources {
     descriptors: HashMap<ResourceId, ResourceDescriptor>,
     handles: HashMap<ResourceId, ResourceHandle>,
+    versions: HashMap<ResourceId, u64>,
     next_id: u32,
 }
 
@@ -193,8 +140,18 @@ impl RenderGraphResources {
         Self {
             descriptors: HashMap::new(),
             handles: HashMap::new(),
+            versions: HashMap::new(),
             next_id: 0,
         }
+    }
+
+    pub fn get_version(&self, id: ResourceId) -> u64 {
+        *self.versions.get(&id).unwrap_or(&0)
+    }
+
+    fn increment_version(&mut self, id: ResourceId) {
+        let version = self.versions.entry(id).or_insert(0);
+        *version += 1;
     }
 
     pub fn register_external_resource(
@@ -266,7 +223,23 @@ impl RenderGraphResources {
         let descriptor = self
             .get_descriptor(id)
             .unwrap_or_else(|| panic!("Color attachment {:?} descriptor not found", id));
-        (handle.view(), descriptor.color_load_op(), handle.store_op())
+
+        let load_op = match &descriptor.resource_type {
+            ResourceType::ExternalColor { clear_color }
+            | ResourceType::TransientColor { clear_color, .. } => {
+                if let Some(color) = clear_color {
+                    wgpu::LoadOp::Clear(*color)
+                } else {
+                    wgpu::LoadOp::Load
+                }
+            }
+            _ => panic!(
+                "get_color_attachment called on non-color texture resource '{}'",
+                descriptor.name
+            ),
+        };
+
+        (handle.view(), load_op, handle.store_op())
     }
 
     pub fn get_depth_attachment(
@@ -279,223 +252,77 @@ impl RenderGraphResources {
         let descriptor = self
             .get_descriptor(id)
             .unwrap_or_else(|| panic!("Depth attachment {:?} descriptor not found", id));
-        (handle.view(), descriptor.depth_load_op(), handle.store_op())
-    }
 
-    pub fn get_texture(&self, id: ResourceId) -> Option<&Arc<Texture>> {
-        self.get_handle(id).and_then(|handle| handle.texture())
+        let load_op = match &descriptor.resource_type {
+            ResourceType::ExternalDepth { clear_depth }
+            | ResourceType::TransientDepth { clear_depth, .. } => {
+                if let Some(depth) = clear_depth {
+                    wgpu::LoadOp::Clear(*depth)
+                } else {
+                    wgpu::LoadOp::Load
+                }
+            }
+            _ => panic!(
+                "get_depth_attachment called on non-depth texture resource '{}'",
+                descriptor.name
+            ),
+        };
+
+        (handle.view(), load_op, handle.store_op())
     }
 
     pub fn get_texture_view(&self, id: ResourceId) -> Option<&TextureView> {
         self.get_handle(id).map(|handle| handle.view())
     }
 
-    pub fn get_buffer(&self, id: ResourceId) -> Option<&Arc<Buffer>> {
-        self.get_handle(id).and_then(|handle| handle.buffer())
-    }
+    pub fn update_transient_descriptor(&mut self, id: ResourceId, width: u32, height: u32) {
+        let descriptor = self.get_descriptor(id).unwrap_or_else(|| {
+            panic!("Resource {:?} not found", id);
+        });
 
-    pub fn resize_transient_resource(
-        &mut self,
-        device: &Device,
-        id: ResourceId,
-        width: u32,
-        height: u32,
-    ) {
-        let (name, updated_descriptor) = {
-            let descriptor = self.get_descriptor(id).unwrap_or_else(|| {
-                panic!("Resource {:?} not found", id);
-            });
+        if descriptor.is_external {
+            panic!("Cannot resize external resource '{}'", descriptor.name);
+        }
 
-            if descriptor.is_external {
-                panic!("Cannot resize external resource '{}'", descriptor.name);
-            }
+        let name = descriptor.name.clone();
 
-            let name = descriptor.name.clone();
-
-            let updated_descriptor = match &descriptor.resource_type {
-                ResourceType::TransientColor {
-                    descriptor: tex_desc,
-                    clear_color,
-                } => ResourceType::TransientColor {
-                    descriptor: RenderGraphTextureDescriptor {
-                        width,
-                        height,
-                        ..tex_desc.clone()
-                    },
-                    clear_color: *clear_color,
-                },
-                ResourceType::TransientDepth {
-                    descriptor: tex_desc,
-                    clear_depth,
-                } => ResourceType::TransientDepth {
-                    descriptor: RenderGraphTextureDescriptor {
-                        width,
-                        height,
-                        ..tex_desc.clone()
-                    },
-                    clear_depth: *clear_depth,
-                },
-                ResourceType::TransientBuffer { .. } => {
-                    panic!("Cannot resize buffer '{}' with width/height", name)
-                }
-                _ => panic!("Cannot resize non-transient resource '{}'", name),
-            };
-
-            (name, updated_descriptor)
-        };
-
-        self.descriptors.insert(
-            id,
-            ResourceDescriptor {
-                name: name.clone(),
-                resource_type: updated_descriptor.clone(),
-                is_external: false,
-            },
-        );
-
-        let texture_descriptor = match &updated_descriptor {
+        let updated_descriptor = match &descriptor.resource_type {
             ResourceType::TransientColor {
                 descriptor: tex_desc,
-                ..
-            }
-            | ResourceType::TransientDepth {
-                descriptor: tex_desc,
-                ..
-            } => tex_desc.to_wgpu_descriptor(Some(&name)),
-            _ => unreachable!(),
-        };
-
-        let texture = Arc::new(device.create_texture(&texture_descriptor));
-        let view = texture.create_view(&TextureViewDescriptor::default());
-
-        let store_op = self
-            .handles
-            .get(&id)
-            .map(|h| h.store_op())
-            .unwrap_or(StoreOp::Store);
-
-        self.handles.insert(
-            id,
-            ResourceHandle::TransientTexture {
-                texture,
-                view,
-                store_op,
-            },
-        );
-    }
-
-    pub fn resize_transient_buffer(&mut self, device: &Device, id: ResourceId, size: u64) {
-        let (name, updated_descriptor) = {
-            let descriptor = self.get_descriptor(id).unwrap_or_else(|| {
-                panic!("Resource {:?} not found", id);
-            });
-
-            if descriptor.is_external {
-                panic!("Cannot resize external resource '{}'", descriptor.name);
-            }
-
-            let name = descriptor.name.clone();
-
-            let updated_descriptor = match &descriptor.resource_type {
-                ResourceType::TransientBuffer {
-                    descriptor: buf_desc,
-                } => ResourceType::TransientBuffer {
-                    descriptor: RenderGraphBufferDescriptor {
-                        size,
-                        ..buf_desc.clone()
-                    },
+                clear_color,
+            } => ResourceType::TransientColor {
+                descriptor: RenderGraphTextureDescriptor {
+                    width,
+                    height,
+                    ..tex_desc.clone()
                 },
-                _ => panic!("Cannot resize non-buffer resource '{}'", name),
-            };
-
-            (name, updated_descriptor)
+                clear_color: *clear_color,
+            },
+            ResourceType::TransientDepth {
+                descriptor: tex_desc,
+                clear_depth,
+            } => ResourceType::TransientDepth {
+                descriptor: RenderGraphTextureDescriptor {
+                    width,
+                    height,
+                    ..tex_desc.clone()
+                },
+                clear_depth: *clear_depth,
+            },
+            ResourceType::TransientBuffer { .. } => {
+                panic!("Cannot resize buffer '{}' with width/height", name)
+            }
+            _ => panic!("Cannot resize non-transient resource '{}'", name),
         };
 
         self.descriptors.insert(
             id,
             ResourceDescriptor {
-                name: name.clone(),
-                resource_type: updated_descriptor.clone(),
+                name,
+                resource_type: updated_descriptor,
                 is_external: false,
             },
         );
-
-        let buffer_descriptor = match &updated_descriptor {
-            ResourceType::TransientBuffer {
-                descriptor: buf_desc,
-            } => buf_desc.to_wgpu_descriptor(Some(&name)),
-            _ => unreachable!(),
-        };
-
-        let buffer = Arc::new(device.create_buffer(&buffer_descriptor));
-
-        if let Some(handle) = self.handles.get_mut(&id) {
-            *handle = ResourceHandle::TransientBuffer { buffer };
-        }
-    }
-
-    pub fn allocate_transient_resources(
-        &mut self,
-        device: &Device,
-        store_ops: &HashMap<ResourceId, StoreOp>,
-    ) {
-        let mut to_allocate = Vec::new();
-
-        for (id, descriptor) in &self.descriptors {
-            if !descriptor.is_external && !self.handles.contains_key(id) {
-                to_allocate.push((*id, descriptor.clone()));
-            }
-        }
-
-        for (id, descriptor) in to_allocate {
-            match &descriptor.resource_type {
-                ResourceType::TransientColor {
-                    descriptor: tex_desc,
-                    ..
-                }
-                | ResourceType::TransientDepth {
-                    descriptor: tex_desc,
-                    ..
-                } => {
-                    let texture_descriptor = tex_desc.to_wgpu_descriptor(Some(&descriptor.name));
-                    let texture = Arc::new(device.create_texture(&texture_descriptor));
-                    let view = texture.create_view(&TextureViewDescriptor::default());
-                    let store_op = *store_ops.get(&id).unwrap_or(&StoreOp::Store);
-
-                    self.handles.insert(
-                        id,
-                        ResourceHandle::TransientTexture {
-                            texture,
-                            view,
-                            store_op,
-                        },
-                    );
-                }
-                ResourceType::TransientBuffer {
-                    descriptor: buf_desc,
-                } => {
-                    let buffer_descriptor = buf_desc.to_wgpu_descriptor(Some(&descriptor.name));
-                    let buffer = Arc::new(device.create_buffer(&buffer_descriptor));
-
-                    self.handles
-                        .insert(id, ResourceHandle::TransientBuffer { buffer });
-                }
-                _ => panic!(
-                    "Attempted to allocate non-transient resource '{}'",
-                    descriptor.name
-                ),
-            }
-        }
-    }
-
-    pub fn clear_transient_handles(&mut self) {
-        self.handles.retain(|id, _| {
-            if let Some(descriptor) = self.descriptors.get(id) {
-                descriptor.is_external
-            } else {
-                false
-            }
-        });
     }
 
     pub fn allocate_transient_resources_with_aliasing(
@@ -516,22 +343,18 @@ impl RenderGraphResources {
                     PoolDescriptorInfo::Texture(tex_desc) => {
                         let texture_descriptor = tex_desc.to_wgpu_descriptor(Some(&label));
                         let texture = Arc::new(device.create_texture(&texture_descriptor));
-                        pool_slot.resource = Some(PooledResource::Texture {
-                            texture,
-                            descriptor: tex_desc.clone(),
-                        });
+                        pool_slot.resource = Some(PooledResource::Texture { texture });
                     }
                     PoolDescriptorInfo::Buffer(buf_desc) => {
                         let buffer_descriptor = buf_desc.to_wgpu_descriptor(Some(&label));
                         let buffer = Arc::new(device.create_buffer(&buffer_descriptor));
-                        pool_slot.resource = Some(PooledResource::Buffer {
-                            buffer,
-                            descriptor: buf_desc.clone(),
-                        });
+                        pool_slot.resource = Some(PooledResource::Buffer { buffer });
                     }
                 }
             }
         }
+
+        let mut allocated_resources = Vec::new();
 
         for (resource_id, descriptor) in &self.descriptors {
             if descriptor.is_external || self.handles.contains_key(resource_id) {
@@ -554,6 +377,7 @@ impl RenderGraphResources {
                                 store_op,
                             },
                         );
+                        allocated_resources.push(*resource_id);
                     }
                     Some(PooledResource::Buffer { buffer, .. }) => {
                         self.handles.insert(
@@ -562,68 +386,97 @@ impl RenderGraphResources {
                                 buffer: Arc::clone(buffer),
                             },
                         );
+                        allocated_resources.push(*resource_id);
                     }
                     None => {}
                 }
             }
         }
+
+        for resource_id in allocated_resources {
+            self.increment_version(resource_id);
+        }
     }
 }
 
-pub enum PassType {
-    Render,
-    Compute,
+impl Default for RenderGraphResources {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum QueueType {
-    Graphics,
-    Compute,
-}
-
-pub struct PassExecutionContext<'a> {
+pub struct PassExecutionContext<'a, C = ()> {
     pub encoder: &'a mut CommandEncoder,
     pub resources: &'a RenderGraphResources,
     pub device: &'a Device,
+    slot_mappings: &'a HashMap<String, ResourceId>,
+    pub configs: &'a C,
 }
 
-pub trait PassNode: Send + Sync {
+impl<'a, C> PassExecutionContext<'a, C> {
+    pub fn get_slot(&self, slot: &str) -> ResourceId {
+        *self
+            .slot_mappings
+            .get(slot)
+            .unwrap_or_else(|| panic!("Slot '{}' not found in pass resource mappings", slot))
+    }
+
+    pub fn get_texture_view(&self, slot: &str) -> &'a wgpu::TextureView {
+        let resource_id = self.get_slot(slot);
+        self.resources
+            .get_texture_view(resource_id)
+            .unwrap_or_else(|| panic!("Texture view for slot '{}' not allocated", slot))
+    }
+
+    pub fn get_color_attachment(
+        &self,
+        slot: &str,
+    ) -> (
+        &'a wgpu::TextureView,
+        wgpu::LoadOp<wgpu::Color>,
+        wgpu::StoreOp,
+    ) {
+        let resource_id = self.get_slot(slot);
+        self.resources.get_color_attachment(resource_id)
+    }
+
+    pub fn get_depth_attachment(
+        &self,
+        slot: &str,
+    ) -> (&'a wgpu::TextureView, wgpu::LoadOp<f32>, wgpu::StoreOp) {
+        let resource_id = self.get_slot(slot);
+        self.resources.get_depth_attachment(resource_id)
+    }
+}
+
+pub trait PassNode<C = ()>: Send + Sync {
     fn name(&self) -> &str;
-    fn pass_type(&self) -> PassType {
-        PassType::Render
-    }
-    fn queue(&self) -> QueueType {
-        QueueType::Graphics
-    }
-    fn enabled(&self) -> bool {
-        true
-    }
-    fn reads(&self) -> Vec<ResourceId>;
-    fn writes(&self) -> Vec<ResourceId>;
-    fn reads_writes(&self) -> Vec<ResourceId> {
+    fn reads(&self) -> Vec<&str>;
+    fn writes(&self) -> Vec<&str>;
+    fn reads_writes(&self) -> Vec<&str> {
         Vec::new()
     }
-    fn execute(&mut self, context: PassExecutionContext);
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+    fn prepare(&mut self, _device: &Device, _queue: &wgpu::Queue, _configs: &C) {}
+    fn invalidate_bind_groups(&mut self) {}
+    fn execute(&mut self, context: PassExecutionContext<C>);
 }
 
-#[derive(Clone)]
-pub struct GraphNode {
+pub struct GraphNode<C> {
     pub name: String,
     pub reads: Vec<ResourceId>,
     pub writes: Vec<ResourceId>,
     pub reads_writes: Vec<ResourceId>,
-    pub queue: QueueType,
+    pub pass: Box<dyn PassNode<C>>,
 }
 
-pub struct ColorTextureBuilder<'a> {
-    graph: &'a mut RenderGraph,
+pub struct ColorTextureBuilder<'a, C = ()> {
+    graph: &'a mut RenderGraph<C>,
     name: String,
     descriptor: RenderGraphTextureDescriptor,
     clear_color: Option<wgpu::Color>,
 }
 
-impl<'a> ColorTextureBuilder<'a> {
+impl<'a, C> ColorTextureBuilder<'a, C> {
     pub fn format(mut self, format: TextureFormat) -> Self {
         self.descriptor.format = format;
         self
@@ -655,27 +508,6 @@ impl<'a> ColorTextureBuilder<'a> {
         self
     }
 
-    fn validate(&self) {
-        if self.descriptor.width == 0 || self.descriptor.height == 0 {
-            panic!(
-                "Texture '{}' has invalid dimensions: {}x{}. Width and height must be > 0",
-                self.name, self.descriptor.width, self.descriptor.height
-            );
-        }
-        if self.descriptor.sample_count == 0 {
-            panic!(
-                "Texture '{}' has invalid sample_count: {}. Must be >= 1",
-                self.name, self.descriptor.sample_count
-            );
-        }
-        if self.descriptor.mip_level_count == 0 {
-            panic!(
-                "Texture '{}' has invalid mip_level_count: {}. Must be >= 1",
-                self.name, self.descriptor.mip_level_count
-            );
-        }
-    }
-
     pub fn external(self) -> ResourceId {
         self.graph.resources.register_external_resource(
             self.name,
@@ -686,7 +518,6 @@ impl<'a> ColorTextureBuilder<'a> {
     }
 
     pub fn transient(self) -> ResourceId {
-        self.validate();
         self.graph.resources.register_transient_resource(
             self.name,
             ResourceType::TransientColor {
@@ -697,14 +528,14 @@ impl<'a> ColorTextureBuilder<'a> {
     }
 }
 
-pub struct DepthTextureBuilder<'a> {
-    graph: &'a mut RenderGraph,
+pub struct DepthTextureBuilder<'a, C = ()> {
+    graph: &'a mut RenderGraph<C>,
     name: String,
     descriptor: RenderGraphTextureDescriptor,
     clear_depth: Option<f32>,
 }
 
-impl<'a> DepthTextureBuilder<'a> {
+impl<'a, C> DepthTextureBuilder<'a, C> {
     pub fn format(mut self, format: TextureFormat) -> Self {
         self.descriptor.format = format;
         self
@@ -736,27 +567,6 @@ impl<'a> DepthTextureBuilder<'a> {
         self
     }
 
-    fn validate(&self) {
-        if self.descriptor.width == 0 || self.descriptor.height == 0 {
-            panic!(
-                "Texture '{}' has invalid dimensions: {}x{}. Width and height must be > 0",
-                self.name, self.descriptor.width, self.descriptor.height
-            );
-        }
-        if self.descriptor.sample_count == 0 {
-            panic!(
-                "Texture '{}' has invalid sample_count: {}. Must be >= 1",
-                self.name, self.descriptor.sample_count
-            );
-        }
-        if self.descriptor.mip_level_count == 0 {
-            panic!(
-                "Texture '{}' has invalid mip_level_count: {}. Must be >= 1",
-                self.name, self.descriptor.mip_level_count
-            );
-        }
-    }
-
     pub fn external(self) -> ResourceId {
         self.graph.resources.register_external_resource(
             self.name,
@@ -767,7 +577,6 @@ impl<'a> DepthTextureBuilder<'a> {
     }
 
     pub fn transient(self) -> ResourceId {
-        self.validate();
         self.graph.resources.register_transient_resource(
             self.name,
             ResourceType::TransientDepth {
@@ -778,13 +587,13 @@ impl<'a> DepthTextureBuilder<'a> {
     }
 }
 
-pub struct BufferBuilder<'a> {
-    graph: &'a mut RenderGraph,
+pub struct BufferBuilder<'a, C = ()> {
+    graph: &'a mut RenderGraph<C>,
     name: String,
     descriptor: RenderGraphBufferDescriptor,
 }
 
-impl<'a> BufferBuilder<'a> {
+impl<'a, C> BufferBuilder<'a, C> {
     pub fn size(mut self, size: u64) -> Self {
         self.descriptor.size = size;
         self
@@ -800,15 +609,6 @@ impl<'a> BufferBuilder<'a> {
         self
     }
 
-    fn validate(&self) {
-        if self.descriptor.size == 0 {
-            panic!(
-                "Buffer '{}' has invalid size: {}. Size must be > 0",
-                self.name, self.descriptor.size
-            );
-        }
-    }
-
     pub fn external(self) -> ResourceId {
         self.graph
             .resources
@@ -816,7 +616,6 @@ impl<'a> BufferBuilder<'a> {
     }
 
     pub fn transient(self) -> ResourceId {
-        self.validate();
         self.graph.resources.register_transient_resource(
             self.name,
             ResourceType::TransientBuffer {
@@ -826,68 +625,95 @@ impl<'a> BufferBuilder<'a> {
     }
 }
 
-pub struct RenderGraph {
-    graph: DiGraph<GraphNode, ResourceId>,
+pub struct RenderGraph<C = ()> {
+    graph: DiGraph<GraphNode<C>, ResourceId>,
     pass_nodes: HashMap<String, NodeIndex>,
-    passes: HashMap<String, Box<dyn PassNode>>,
+    pass_resource_mappings: HashMap<String, HashMap<String, ResourceId>>,
     resources: RenderGraphResources,
     execution_order: Vec<NodeIndex>,
     store_ops: HashMap<ResourceId, StoreOp>,
-    statistics: Vec<PassStatistics>,
-    profiling_enabled: bool,
     aliasing_info: Option<ResourceAliasingInfo>,
-    aliasing_enabled: bool,
     needs_recompile: bool,
+    needs_resource_reallocation: bool,
+    culled_passes: std::collections::HashSet<NodeIndex>,
+    resource_versions: HashMap<ResourceId, u64>,
 }
 
-impl RenderGraph {
+impl<C> RenderGraph<C> {
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
             pass_nodes: HashMap::new(),
-            passes: HashMap::new(),
+            pass_resource_mappings: HashMap::new(),
             resources: RenderGraphResources::new(),
             execution_order: Vec::new(),
             store_ops: HashMap::new(),
-            statistics: Vec::new(),
-            profiling_enabled: false,
             aliasing_info: None,
-            aliasing_enabled: true,
             needs_recompile: true,
+            needs_resource_reallocation: false,
+            culled_passes: std::collections::HashSet::new(),
+            resource_versions: HashMap::new(),
         }
     }
 
-    pub fn add_pass(&mut self, pass: Box<dyn PassNode>) -> NodeIndex {
+    pub fn add_pass(
+        &mut self,
+        pass: Box<dyn PassNode<C>>,
+        slot_mappings: &[(&str, ResourceId)],
+    ) -> NodeIndex {
         let name = pass.name().to_string();
-        let reads = pass.reads();
-        let writes = pass.writes();
-        let reads_writes = pass.reads_writes();
-        let queue = pass.queue();
+        let slot_names_reads = pass.reads();
+        let slot_names_writes = pass.writes();
+        let slot_names_reads_writes = pass.reads_writes();
+
+        let mappings: HashMap<String, ResourceId> = slot_mappings
+            .iter()
+            .map(|(slot, resource_id)| (slot.to_string(), *resource_id))
+            .collect();
+
+        let reads: Vec<ResourceId> = slot_names_reads
+            .iter()
+            .map(|slot| {
+                *mappings.get(*slot).unwrap_or_else(|| {
+                    panic!("Pass '{}': slot '{}' not provided in mappings", name, slot)
+                })
+            })
+            .collect();
+
+        let writes: Vec<ResourceId> = slot_names_writes
+            .iter()
+            .map(|slot| {
+                *mappings.get(*slot).unwrap_or_else(|| {
+                    panic!("Pass '{}': slot '{}' not provided in mappings", name, slot)
+                })
+            })
+            .collect();
+
+        let reads_writes: Vec<ResourceId> = slot_names_reads_writes
+            .iter()
+            .map(|slot| {
+                *mappings.get(*slot).unwrap_or_else(|| {
+                    panic!("Pass '{}': slot '{}' not provided in mappings", name, slot)
+                })
+            })
+            .collect();
 
         let graph_node = GraphNode {
             name: name.clone(),
             reads,
             writes,
             reads_writes,
-            queue,
+            pass,
         };
 
         let index = self.graph.add_node(graph_node);
         self.pass_nodes.insert(name.clone(), index);
-        self.passes.insert(name, pass);
+        self.pass_resource_mappings.insert(name, mappings);
         self.needs_recompile = true;
         index
     }
 
-    pub fn remove_pass(&mut self, pass_name: &str) -> Option<Box<dyn PassNode>> {
-        let node_index = self.pass_nodes.remove(pass_name)?;
-        self.graph.remove_node(node_index);
-        let pass = self.passes.remove(pass_name);
-        self.needs_recompile = true;
-        pass
-    }
-
-    pub fn add_color_texture(&mut self, name: &str) -> ColorTextureBuilder<'_> {
+    pub fn add_color_texture(&mut self, name: &str) -> ColorTextureBuilder<'_, C> {
         ColorTextureBuilder {
             graph: self,
             name: name.to_string(),
@@ -903,7 +729,7 @@ impl RenderGraph {
         }
     }
 
-    pub fn add_depth_texture(&mut self, name: &str) -> DepthTextureBuilder<'_> {
+    pub fn add_depth_texture(&mut self, name: &str) -> DepthTextureBuilder<'_, C> {
         DepthTextureBuilder {
             graph: self,
             name: name.to_string(),
@@ -919,7 +745,7 @@ impl RenderGraph {
         }
     }
 
-    pub fn add_buffer(&mut self, name: &str) -> BufferBuilder<'_> {
+    pub fn add_buffer(&mut self, name: &str) -> BufferBuilder<'_, C> {
         BufferBuilder {
             graph: self,
             name: name.to_string(),
@@ -971,153 +797,6 @@ impl RenderGraph {
         for (from, to, resource) in edges_to_add {
             self.graph.add_edge(from, to, resource);
         }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        self.validate_multiple_writers()?;
-        self.validate_missing_resources()?;
-        self.validate_no_cycles()?;
-        Ok(())
-    }
-
-    fn validate_multiple_writers(&self) -> Result<(), String> {
-        let mut resource_writers: HashMap<ResourceId, Vec<String>> = HashMap::new();
-
-        for node_index in self.graph.node_indices() {
-            let node = &self.graph[node_index];
-
-            for &write_resource in &node.writes {
-                resource_writers
-                    .entry(write_resource)
-                    .or_default()
-                    .push(node.name.clone());
-            }
-            for &rw_resource in &node.reads_writes {
-                resource_writers
-                    .entry(rw_resource)
-                    .or_default()
-                    .push(node.name.clone());
-            }
-        }
-
-        for (resource_id, writers) in &resource_writers {
-            if writers.len() > 1 {
-                let writer_indices: Vec<NodeIndex> = self
-                    .graph
-                    .node_indices()
-                    .filter(|&idx| writers.contains(&self.graph[idx].name))
-                    .collect();
-
-                let has_valid_dependencies = if writer_indices.len() == 2 {
-                    self.graph
-                        .contains_edge(writer_indices[0], writer_indices[1])
-                        || self
-                            .graph
-                            .contains_edge(writer_indices[1], writer_indices[0])
-                } else {
-                    let mut all_connected = true;
-                    for i in 0..writer_indices.len() {
-                        let mut has_connection = false;
-                        for j in 0..writer_indices.len() {
-                            if i != j
-                                && (self
-                                    .graph
-                                    .contains_edge(writer_indices[i], writer_indices[j])
-                                    || self
-                                        .graph
-                                        .contains_edge(writer_indices[j], writer_indices[i])
-                                    || petgraph::algo::has_path_connecting(
-                                        &self.graph,
-                                        writer_indices[i],
-                                        writer_indices[j],
-                                        None,
-                                    )
-                                    || petgraph::algo::has_path_connecting(
-                                        &self.graph,
-                                        writer_indices[j],
-                                        writer_indices[i],
-                                        None,
-                                    ))
-                            {
-                                has_connection = true;
-                                break;
-                            }
-                        }
-                        if !has_connection {
-                            all_connected = false;
-                            break;
-                        }
-                    }
-                    all_connected
-                };
-
-                if !has_valid_dependencies {
-                    return Err(format!(
-                        "Resource {:?} written by multiple passes without dependency: {:?}",
-                        resource_id, writers
-                    ));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn validate_missing_resources(&self) -> Result<(), String> {
-        let mut resource_writers: HashMap<ResourceId, Vec<String>> = HashMap::new();
-        let mut resource_readers: HashMap<ResourceId, Vec<String>> = HashMap::new();
-
-        for node_index in self.graph.node_indices() {
-            let node = &self.graph[node_index];
-
-            for &read_resource in &node.reads {
-                resource_readers
-                    .entry(read_resource)
-                    .or_default()
-                    .push(node.name.clone());
-            }
-
-            for &write_resource in &node.writes {
-                resource_writers
-                    .entry(write_resource)
-                    .or_default()
-                    .push(node.name.clone());
-            }
-
-            for &rw_resource in &node.reads_writes {
-                resource_readers
-                    .entry(rw_resource)
-                    .or_default()
-                    .push(node.name.clone());
-                resource_writers
-                    .entry(rw_resource)
-                    .or_default()
-                    .push(node.name.clone());
-            }
-        }
-
-        for (resource_id, readers) in &resource_readers {
-            let descriptor = self
-                .resources
-                .get_descriptor(*resource_id)
-                .ok_or_else(|| format!("Resource {:?} used but not registered", resource_id))?;
-
-            if !descriptor.is_external && !resource_writers.contains_key(resource_id) {
-                return Err(format!(
-                    "Resource '{}' ({:?}) is read by {:?} but never written",
-                    descriptor.name, resource_id, readers
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn validate_no_cycles(&self) -> Result<(), String> {
-        if petgraph::algo::toposort(&self.graph, None).is_err() {
-            return Err("Render graph contains cycles".to_string());
-        }
-        Ok(())
     }
 
     fn compute_resource_lifetimes(&self, execution_order: &[NodeIndex]) -> Vec<ResourceLifetime> {
@@ -1175,7 +854,7 @@ impl RenderGraph {
             && desc1.height == desc2.height
             && desc1.sample_count == desc2.sample_count
             && desc1.mip_level_count == desc2.mip_level_count
-            && desc1.usage == desc2.usage
+            && desc1.usage.contains(desc2.usage)
     }
 
     fn can_alias_buffers(
@@ -1235,20 +914,31 @@ impl RenderGraph {
                 };
 
                 if can_reuse {
-                    if let (
+                    let needs_new_resource = if let (
                         PoolDescriptorInfo::Buffer(pool_desc),
                         ResourceType::TransientBuffer {
                             descriptor: res_desc,
                         },
-                    ) = (&mut candidate.descriptor_info, &descriptor.resource_type)
-                        && res_desc.size > pool_desc.size
+                    ) =
+                        (&mut candidate.descriptor_info, &descriptor.resource_type)
                     {
-                        *pool_desc = res_desc.clone();
-                    }
+                        if res_desc.size > pool_desc.size {
+                            *pool_desc = res_desc.clone();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
 
                     let pool_slot = &mut aliasing_info.pools[candidate.pool_index];
                     pool_slot.lifetime_end = lifetime.last_use;
                     pool_slot.descriptor_info = Some(candidate.descriptor_info.clone());
+
+                    if needs_new_resource {
+                        pool_slot.resource = None;
+                    }
 
                     candidate.lifetime_end = lifetime.last_use;
                     assigned_slot = Some(candidate.pool_index);
@@ -1302,40 +992,91 @@ impl RenderGraph {
     }
 
     fn compute_store_ops(&self, execution_order: &[NodeIndex]) -> HashMap<ResourceId, StoreOp> {
+        let mut last_read: HashMap<ResourceId, usize> = HashMap::new();
+
+        for (index, &node_index) in execution_order.iter().enumerate().rev() {
+            let node = &self.graph[node_index];
+
+            for &resource_id in node.reads.iter().chain(&node.reads_writes) {
+                last_read.entry(resource_id).or_insert(index);
+            }
+        }
+
         let mut store_ops = HashMap::new();
 
-        for &resource_id in self.resources.descriptors.keys() {
-            let descriptor = self.resources.get_descriptor(resource_id).unwrap();
+        for (index, &node_index) in execution_order.iter().enumerate() {
+            let node = &self.graph[node_index];
 
-            if descriptor.is_external {
-                store_ops.insert(resource_id, StoreOp::Store);
-                continue;
-            }
+            for &resource_id in node.writes.iter().chain(&node.reads_writes) {
+                let descriptor = self.resources.get_descriptor(resource_id).unwrap();
 
-            let mut is_read = false;
-            for &node_index in execution_order {
-                let node = &self.graph[node_index];
-
-                if node.reads.contains(&resource_id) || node.reads_writes.contains(&resource_id) {
-                    is_read = true;
-                    break;
+                if descriptor.is_external {
+                    store_ops.insert(resource_id, StoreOp::Store);
+                    continue;
                 }
-            }
 
-            let store_op = if is_read {
-                StoreOp::Store
-            } else {
-                StoreOp::Discard
-            };
-            store_ops.insert(resource_id, store_op);
+                let store_op = if last_read
+                    .get(&resource_id)
+                    .is_some_and(|&last| last > index)
+                {
+                    StoreOp::Store
+                } else {
+                    StoreOp::Discard
+                };
+                store_ops.insert(resource_id, store_op);
+            }
+        }
+
+        for &resource_id in self.resources.descriptors.keys() {
+            store_ops.entry(resource_id).or_insert_with(|| {
+                let descriptor = self.resources.get_descriptor(resource_id).unwrap();
+                if descriptor.is_external {
+                    StoreOp::Store
+                } else {
+                    StoreOp::Discard
+                }
+            });
         }
 
         store_ops
     }
 
+    fn compute_dead_passes(&self, execution_order: &[NodeIndex]) -> HashSet<NodeIndex> {
+        let mut required_resources: HashSet<ResourceId> = HashSet::new();
+        let mut required_passes: HashSet<NodeIndex> = HashSet::new();
+
+        for &resource_id in self.resources.descriptors.keys() {
+            let descriptor = self.resources.get_descriptor(resource_id).unwrap();
+            if descriptor.is_external {
+                required_resources.insert(resource_id);
+            }
+        }
+
+        for &node_index in execution_order.iter().rev() {
+            let node = &self.graph[node_index];
+
+            let has_side_effects = node.writes.is_empty() && node.reads_writes.is_empty();
+
+            let writes_required_resource =
+                node.writes.iter().any(|r| required_resources.contains(r))
+                    || node
+                        .reads_writes
+                        .iter()
+                        .any(|r| required_resources.contains(r));
+
+            if writes_required_resource || has_side_effects {
+                required_passes.insert(node_index);
+                required_resources.extend(&node.reads);
+                required_resources.extend(&node.reads_writes);
+            }
+        }
+
+        let all_passes: HashSet<NodeIndex> = execution_order.iter().copied().collect();
+        all_passes.difference(&required_passes).copied().collect()
+    }
+
     pub fn compile(&mut self) -> Result<(), String> {
         self.build_dependency_edges();
-        self.validate()?;
 
         self.execution_order = petgraph::algo::toposort(&self.graph, None)
             .map_err(|_| "Render graph contains cycles")?;
@@ -1345,11 +1086,20 @@ impl RenderGraph {
         let lifetimes = self.compute_resource_lifetimes(&self.execution_order);
         self.aliasing_info = Some(self.compute_resource_aliasing(lifetimes));
 
+        self.culled_passes = self.compute_dead_passes(&self.execution_order);
+
         self.needs_recompile = false;
         Ok(())
     }
 
     fn recompile_if_needed(&mut self) {
+        if self.needs_resource_reallocation {
+            let lifetimes = self.compute_resource_lifetimes(&self.execution_order);
+            self.aliasing_info = Some(self.compute_resource_aliasing(lifetimes));
+            self.needs_resource_reallocation = false;
+            return;
+        }
+
         if !self.needs_recompile {
             return;
         }
@@ -1369,121 +1119,149 @@ impl RenderGraph {
         let lifetimes = self.compute_resource_lifetimes(&self.execution_order);
         self.aliasing_info = Some(self.compute_resource_aliasing(lifetimes));
 
+        self.culled_passes = self.compute_dead_passes(&self.execution_order);
+
         self.needs_recompile = false;
     }
 
-    pub fn execute(&mut self, device: &Device, encoder: &mut CommandEncoder) {
+    pub fn execute(
+        &mut self,
+        device: &Device,
+        queue: &wgpu::Queue,
+        configs: &C,
+    ) -> Vec<CommandBuffer> {
         self.recompile_if_needed();
 
-        if self.aliasing_enabled {
-            if self.aliasing_info.is_none() {
-                let lifetimes = self.compute_resource_lifetimes(&self.execution_order);
-                self.aliasing_info = Some(self.compute_resource_aliasing(lifetimes));
-            }
-
-            if let Some(aliasing_info) = &mut self.aliasing_info {
-                self.resources.allocate_transient_resources_with_aliasing(
-                    device,
-                    &self.store_ops,
-                    aliasing_info,
-                );
-            }
-        } else {
-            self.resources
-                .allocate_transient_resources(device, &self.store_ops);
+        if self.aliasing_info.is_none() {
+            let lifetimes = self.compute_resource_lifetimes(&self.execution_order);
+            self.aliasing_info = Some(self.compute_resource_aliasing(lifetimes));
         }
 
-        if self.profiling_enabled {
-            self.statistics.clear();
+        if let Some(aliasing_info) = &mut self.aliasing_info {
+            self.resources.allocate_transient_resources_with_aliasing(
+                device,
+                &self.store_ops,
+                aliasing_info,
+            );
         }
+
+        self.invalidate_bind_groups_for_changed_resources();
+
+        for &node_index in &self.execution_order {
+            if self.culled_passes.contains(&node_index) {
+                continue;
+            }
+
+            let node = &mut self.graph[node_index];
+            node.pass.prepare(device, queue, configs);
+        }
+
+        self.execute_serial(device, configs)
+    }
+
+    fn invalidate_bind_groups_for_changed_resources(&mut self) {
+        let mut dirty_resources = HashSet::new();
+
+        for &resource_id in self.resources.descriptors.keys() {
+            let current_version = self.resources.get_version(resource_id);
+            let stored_version = self
+                .resource_versions
+                .get(&resource_id)
+                .copied()
+                .unwrap_or(0);
+
+            if current_version != stored_version {
+                dirty_resources.insert(resource_id);
+                self.resource_versions.insert(resource_id, current_version);
+            }
+        }
+
+        if dirty_resources.is_empty() {
+            return;
+        }
+
+        let mut passes_to_invalidate = HashSet::new();
 
         for &node_index in &self.execution_order {
             let node = &self.graph[node_index];
 
-            if let Some(pass) = self.passes.get_mut(&node.name) {
-                let enabled = pass.enabled();
-
-                if self.profiling_enabled {
-                    let start = Instant::now();
-
-                    if enabled {
-                        let context = PassExecutionContext {
-                            encoder,
-                            resources: &self.resources,
-                            device,
-                        };
-                        pass.execute(context);
-                    }
-
-                    let execution_time = start.elapsed();
-                    self.statistics.push(PassStatistics {
-                        pass_name: node.name.clone(),
-                        execution_time,
-                        enabled,
-                    });
-                } else if enabled {
-                    let context = PassExecutionContext {
-                        encoder,
-                        resources: &self.resources,
-                        device,
-                    };
-                    pass.execute(context);
+            for &resource_id in node
+                .reads
+                .iter()
+                .chain(&node.writes)
+                .chain(&node.reads_writes)
+            {
+                if dirty_resources.contains(&resource_id) {
+                    passes_to_invalidate.insert(node_index);
+                    break;
                 }
             }
         }
+
+        for &node_index in &passes_to_invalidate {
+            let node = &mut self.graph[node_index];
+            node.pass.invalidate_bind_groups();
+        }
     }
 
-    pub fn enable_profiling(&mut self, enabled: bool) {
-        self.profiling_enabled = enabled;
-    }
+    fn execute_serial(&mut self, device: &Device, configs: &C) -> Vec<CommandBuffer> {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("RenderGraph Serial Encoder"),
+        });
 
-    pub fn get_statistics(&self) -> &[PassStatistics] {
-        &self.statistics
-    }
+        for &node_index in &self.execution_order {
+            if self.culled_passes.contains(&node_index) {
+                continue;
+            }
 
-    pub fn enable_aliasing(&mut self, enabled: bool) {
-        self.aliasing_enabled = enabled;
+            let node = &mut self.graph[node_index];
+            let slot_mappings = self
+                .pass_resource_mappings
+                .get(&node.name)
+                .expect("Pass resource mappings not found");
+            let context = PassExecutionContext {
+                encoder: &mut encoder,
+                resources: &self.resources,
+                device,
+                slot_mappings,
+                configs,
+            };
+            node.pass.execute(context);
+        }
+
+        vec![encoder.finish()]
     }
 
     pub fn resources_mut(&mut self) -> &mut RenderGraphResources {
         &mut self.resources
     }
 
-    pub fn get_execution_order(&self) -> Vec<String> {
-        self.execution_order
-            .iter()
-            .map(|&index| self.graph[index].name.clone())
-            .collect()
-    }
-
-    pub fn get_pass_mut<T: PassNode + 'static>(&mut self, pass_name: &str) -> Option<&mut T> {
-        self.passes
-            .get_mut(pass_name)
-            .and_then(|pass| pass.as_any_mut().downcast_mut::<T>())
-    }
-
     pub fn resize_transient_resource(
         &mut self,
-        device: &Device,
+        _device: &Device,
         id: ResourceId,
         width: u32,
         height: u32,
     ) {
         self.resources
-            .resize_transient_resource(device, id, width, height);
+            .update_transient_descriptor(id, width, height);
 
-        if self.aliasing_enabled {
-            self.aliasing_info = None;
-            self.resources.clear_transient_handles();
-        }
+        self.aliasing_info = None;
+        self.resources.handles.retain(|id, _| {
+            if let Some(descriptor) = self.resources.descriptors.get(id) {
+                descriptor.is_external
+            } else {
+                false
+            }
+        });
+        self.needs_resource_reallocation = true;
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PassStatistics {
-    pub pass_name: String,
-    pub execution_time: Duration,
-    pub enabled: bool,
+impl<C> Default for RenderGraph<C> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1494,14 +1272,8 @@ struct ResourceLifetime {
 }
 
 enum PooledResource {
-    Texture {
-        texture: Arc<Texture>,
-        descriptor: RenderGraphTextureDescriptor,
-    },
-    Buffer {
-        buffer: Arc<Buffer>,
-        descriptor: RenderGraphBufferDescriptor,
-    },
+    Texture { texture: Arc<Texture> },
+    Buffer { buffer: Arc<Buffer> },
 }
 
 #[derive(Clone)]
@@ -1510,7 +1282,7 @@ enum PoolDescriptorInfo {
     Buffer(RenderGraphBufferDescriptor),
 }
 
-pub(crate) struct PoolSlot {
+pub struct PoolSlot {
     resource: Option<PooledResource>,
     descriptor_info: Option<PoolDescriptorInfo>,
     lifetime_end: usize,
@@ -1543,7 +1315,7 @@ impl Ord for PoolHeapEntry {
     }
 }
 
-pub(crate) struct ResourceAliasingInfo {
-    aliases: HashMap<ResourceId, usize>,
-    pools: Vec<PoolSlot>,
+pub struct ResourceAliasingInfo {
+    pub aliases: HashMap<ResourceId, usize>,
+    pub pools: Vec<PoolSlot>,
 }

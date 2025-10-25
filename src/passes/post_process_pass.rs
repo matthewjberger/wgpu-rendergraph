@@ -1,8 +1,8 @@
-use crate::render_graph::{PassExecutionContext, PassNode, ResourceId};
 use std::sync::Arc;
 use wgpu::{
     BindGroup, BindGroupLayout, Operations, RenderPassColorAttachment, RenderPipeline, Sampler,
 };
+use wgpu_render_graph::{PassExecutionContext, PassNode};
 
 const POST_PROCESS_SHADER: &str = "
 struct VertexOutput {
@@ -51,23 +51,15 @@ pub struct PostProcessPassData {
 
 pub struct PostProcessPass {
     pub data: PostProcessPassData,
-    hdr_input: ResourceId,
-    color_output: ResourceId,
     cached_bind_group: Option<BindGroup>,
 }
 
 impl PostProcessPass {
-    pub fn new(data: PostProcessPassData, hdr_input: ResourceId, color_output: ResourceId) -> Self {
+    pub fn new(data: PostProcessPassData) -> Self {
         Self {
             data,
-            hdr_input,
-            color_output,
             cached_bind_group: None,
         }
-    }
-
-    pub fn invalidate_bind_group(&mut self) {
-        self.cached_bind_group = None;
     }
 
     pub fn create_pipeline(
@@ -149,29 +141,26 @@ impl PostProcessPass {
     }
 }
 
-impl PassNode for PostProcessPass {
+impl PassNode<crate::pass_configs::PassConfigs> for PostProcessPass {
     fn name(&self) -> &str {
         "post_process_pass"
     }
 
-    fn reads(&self) -> Vec<ResourceId> {
-        vec![self.hdr_input]
+    fn reads(&self) -> Vec<&str> {
+        vec!["hdr_input"]
     }
 
-    fn writes(&self) -> Vec<ResourceId> {
-        vec![self.color_output]
+    fn writes(&self) -> Vec<&str> {
+        vec!["color_output"]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+    fn invalidate_bind_groups(&mut self) {
+        self.cached_bind_group = None;
     }
 
-    fn execute(&mut self, context: PassExecutionContext) {
+    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
         if self.cached_bind_group.is_none() {
-            let hdr_texture_view = context
-                .resources
-                .get_texture_view(self.hdr_input)
-                .expect("HDR texture not allocated");
+            let hdr_texture_view = context.get_texture_view("hdr_input");
 
             self.cached_bind_group = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -192,7 +181,7 @@ impl PassNode for PostProcessPass {
         }
 
         let (color_view, color_load_op, color_store_op) =
-            context.resources.get_color_attachment(self.color_output);
+            context.get_color_attachment("color_output");
 
         let mut render_pass = context
             .encoder

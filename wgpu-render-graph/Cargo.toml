@@ -1,0 +1,14 @@
+[package]
+name = "wgpu-render-graph"
+version = "0.1.0"
+edition = "2024"
+authors = ["Matthew <matth@example.com>"]
+description = "A dependency-based render graph for wgpu with automatic resource aliasing and pass culling"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+wgpu = { version = "25.0", default-features = false }
+petgraph = "0.6"
+
+[features]
+default = []

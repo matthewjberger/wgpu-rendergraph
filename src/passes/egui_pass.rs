@@ -1,48 +1,34 @@
-use crate::render_graph::{PassExecutionContext, PassNode, ResourceId};
-use egui_wgpu::ScreenDescriptor;
 use wgpu::{LoadOp, Operations, RenderPassColorAttachment};
+use wgpu_render_graph::{PassExecutionContext, PassNode};
 
-pub struct EguiPassData {
-    pub renderer: egui_wgpu::Renderer,
-    pub paint_jobs: Vec<egui::ClippedPrimitive>,
-    pub screen_descriptor: ScreenDescriptor,
-}
-
-pub struct EguiPass {
-    pub data: EguiPassData,
-    color_target: ResourceId,
-}
+pub struct EguiPass;
 
 impl EguiPass {
-    pub fn new(data: EguiPassData, color_target: ResourceId) -> Self {
-        Self { data, color_target }
+    pub fn new() -> Self {
+        Self
     }
 }
 
-impl PassNode for EguiPass {
+impl PassNode<crate::pass_configs::PassConfigs> for EguiPass {
     fn name(&self) -> &str {
         "egui_pass"
     }
 
-    fn reads(&self) -> Vec<ResourceId> {
+    fn reads(&self) -> Vec<&str> {
         Vec::new()
     }
 
-    fn writes(&self) -> Vec<ResourceId> {
+    fn writes(&self) -> Vec<&str> {
         Vec::new()
     }
 
-    fn reads_writes(&self) -> Vec<ResourceId> {
-        vec![self.color_target]
+    fn reads_writes(&self) -> Vec<&str> {
+        vec!["color_target"]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn execute(&mut self, context: PassExecutionContext) {
-        let (color_view, _, color_store_op) =
-            context.resources.get_color_attachment(self.color_target);
+    fn execute(&mut self, context: PassExecutionContext<crate::pass_configs::PassConfigs>) {
+        let config = &context.configs.egui;
+        let (color_view, _, color_store_op) = context.get_color_attachment("color_target");
 
         let render_pass = context
             .encoder
@@ -62,10 +48,12 @@ impl PassNode for EguiPass {
             });
 
         let mut render_pass_static = render_pass.forget_lifetime();
-        self.data.renderer.render(
-            &mut render_pass_static,
-            &self.data.paint_jobs,
-            &self.data.screen_descriptor,
-        );
+        if let Some(renderer) = &config.renderer {
+            renderer.render(
+                &mut render_pass_static,
+                &config.paint_jobs,
+                &config.screen_descriptor,
+            );
+        }
     }
 }

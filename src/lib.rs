@@ -2,8 +2,8 @@
 use wasm_bindgen::prelude::*;
 use wgpu::InstanceDescriptor;
 
+mod pass_configs;
 mod passes;
-mod render_graph;
 
 use std::sync::Arc;
 use web_time::{Duration, Instant};
@@ -437,58 +437,22 @@ impl ApplicationHandler for App {
                                 renderer.set_gaussian_blur_enabled(gaussian_blur_enabled);
                             }
 
-                            let mut histogram_compute_enabled =
-                                renderer.is_histogram_compute_enabled();
-                            if ui
-                                .checkbox(&mut histogram_compute_enabled, "Histogram Compute")
-                                .changed()
-                            {
-                                renderer.set_histogram_compute_enabled(histogram_compute_enabled);
+                            let mut sharpen_enabled = renderer.is_sharpen_enabled();
+                            if ui.checkbox(&mut sharpen_enabled, "Sharpen").changed() {
+                                renderer.set_sharpen_enabled(sharpen_enabled);
                             }
 
-                            if histogram_compute_enabled
-                                && let Some(histogram_data) = renderer.get_histogram_data()
-                            {
-                                let max_value = histogram_data.iter().copied().max().unwrap_or(1);
-                                ui.label("Luminance Histogram:");
-
-                                let bar_width = 2.0;
-                                let chart_width = 256.0 * bar_width;
-                                let chart_height = 100.0;
-
-                                let (response, painter) = ui.allocate_painter(
-                                    egui::Vec2::new(chart_width, chart_height),
-                                    egui::Sense::hover(),
-                                );
-
-                                let rect = response.rect;
-
-                                for (bin_index, &value) in histogram_data.iter().enumerate() {
-                                    if value == 0 {
-                                        continue;
-                                    }
-
-                                    let normalized_height =
-                                        (value as f32 / max_value as f32) * chart_height;
-                                    let x = rect.min.x + bin_index as f32 * bar_width;
-                                    let y_bottom = rect.max.y;
-                                    let y_top = y_bottom - normalized_height;
-
-                                    let bar_rect = egui::Rect::from_min_max(
-                                        egui::pos2(x, y_top),
-                                        egui::pos2(x + bar_width, y_bottom),
-                                    );
-
-                                    painter.rect_filled(bar_rect, 0.0, egui::Color32::GREEN);
+                            if sharpen_enabled {
+                                let mut sharpen_strength = renderer.get_sharpen_strength();
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut sharpen_strength, 0.0..=2.0)
+                                            .text("Strength"),
+                                    )
+                                    .changed()
+                                {
+                                    renderer.set_sharpen_strength(sharpen_strength);
                                 }
-
-                                painter.rect(
-                                    rect,
-                                    0.0,
-                                    egui::Color32::TRANSPARENT,
-                                    egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
-                                    egui::epaint::StrokeKind::Inside,
-                                );
                             }
 
                             let mut convolution_enabled = renderer.is_convolution_enabled();
@@ -629,21 +593,23 @@ impl ApplicationHandler for App {
     }
 }
 
+use pass_configs::PassConfigs;
 use passes::{
     BlitPass, BlitPassData, BrightnessContrastPass, BrightnessContrastPassData, ColorInvertPass,
     ColorInvertPassData, ConvolutionPass, ConvolutionPassData, EdgeDetectionPass,
-    EdgeDetectionPassData, EguiPass, EguiPassData, GaussianBlurHorizontalPass,
-    GaussianBlurPassData, GaussianBlurVerticalPass, GrayscalePass, GrayscalePassData,
-    HistogramComputePass, HistogramComputePassData, PostProcessPass, PostProcessPassData,
-    ScenePass, ScenePassData, VignettePass, VignettePassData,
+    EdgeDetectionPassData, EguiPass, GaussianBlurHorizontalPass, GaussianBlurPassData,
+    GaussianBlurVerticalPass, GrayscalePass, GrayscalePassData, PostProcessPass,
+    PostProcessPassData, ScenePass, ScenePassData, SharpenPass, SharpenPassData, VignettePass,
+    VignettePassData,
 };
-use render_graph::{RenderGraph, ResourceId};
+use wgpu_render_graph::{RenderGraph, ResourceId};
 
 pub struct Renderer {
     gpu: Gpu,
     depth_texture_view: wgpu::TextureView,
     scene: Scene,
-    render_graph: RenderGraph,
+    render_graph: RenderGraph<PassConfigs>,
+    pass_configs: PassConfigs,
     surface_resource_id: ResourceId,
     depth_resource_id: ResourceId,
     hdr_resource_id: ResourceId,
@@ -656,7 +622,8 @@ pub struct Renderer {
     vignette_resource_id: ResourceId,
     grayscale_resource_id: ResourceId,
     color_invert_resource_id: ResourceId,
-    histogram_readback_buffer: Arc<wgpu::Buffer>,
+    sharpen_resource_id: ResourceId,
+    _sharpen_uniform_buffer: Arc<wgpu::Buffer>,
 }
 
 impl Renderer {
@@ -798,29 +765,32 @@ impl Renderer {
             sampler: gaussian_blur_sampler,
         };
 
-        let (histogram_compute_pipeline, histogram_compute_bind_group_layout) =
-            HistogramComputePass::create_pipeline(&gpu.device);
+        let (sharpen_pipeline, sharpen_bind_group_layout) =
+            SharpenPass::create_pipeline(&gpu.device, gpu.surface_format);
 
-        let histogram_buffer = Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Histogram Buffer"),
-            size: (256 * std::mem::size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
+        let sharpen_sampler = Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Sharpen Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        let sharpen_uniform_buffer = Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sharpen Uniform Buffer"),
+            size: std::mem::size_of::<[f32; 4]>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
-        let histogram_readback_buffer =
-            Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Histogram Readback Buffer"),
-                size: (256 * std::mem::size_of::<u32>()) as u64,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-
-        let histogram_compute_data = HistogramComputePassData {
-            pipeline: histogram_compute_pipeline,
-            bind_group_layout: histogram_compute_bind_group_layout,
+        let sharpen_data = SharpenPassData {
+            pipeline: sharpen_pipeline,
+            blit_pipeline: Arc::clone(&blit_pipeline),
+            bind_group_layout: sharpen_bind_group_layout,
+            sampler: sharpen_sampler,
         };
 
         let (convolution_pipeline, convolution_bind_group_layout) =
@@ -1011,6 +981,15 @@ impl Renderer {
             .mip_levels(1)
             .transient();
 
+        let sharpen_resource_id = graph
+            .add_color_texture("sharpen")
+            .format(gpu.surface_format)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
         let surface_resource_id = graph
             .add_color_texture("surface")
             .format(gpu.surface_format)
@@ -1045,169 +1024,201 @@ impl Renderer {
             .clear_depth(1.0)
             .external();
 
-        let egui_pass_data = EguiPassData {
-            renderer: egui_renderer,
-            paint_jobs: Vec::new(),
-            screen_descriptor: egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [width, height],
-                pixels_per_point: 1.0,
-            },
-        };
-
-        graph.add_pass(Box::new(ScenePass::new(
-            ScenePassData {
+        graph.add_pass(
+            Box::new(ScenePass::new(ScenePassData {
                 pipeline: Arc::clone(&scene.pipeline),
                 vertex_buffer: Arc::clone(&scene.vertex_buffer),
                 index_buffer: Arc::clone(&scene.index_buffer),
                 index_count: INDICES.len() as u32,
                 uniform_bind_group: Arc::clone(&scene.uniform.bind_group),
                 texture_bind_group: Arc::clone(&scene.texture_bind_group),
-            },
-            hdr_resource_id,
-            depth_resource_id,
-        )));
+            })),
+            &[
+                ("color_output", hdr_resource_id),
+                ("depth_output", depth_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(PostProcessPass::new(
-            PostProcessPassData {
+        graph.add_pass(
+            Box::new(PostProcessPass::new(PostProcessPassData {
                 pipeline: Arc::clone(&post_process_data.pipeline),
                 bind_group_layout: Arc::clone(&post_process_data.bind_group_layout),
                 sampler: Arc::clone(&post_process_data.sampler),
-            },
-            hdr_resource_id,
-            output_resource_id,
-        )));
+            })),
+            &[
+                ("hdr_input", hdr_resource_id),
+                ("color_output", output_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(EdgeDetectionPass::new(
-            EdgeDetectionPassData {
+        graph.add_pass(
+            Box::new(EdgeDetectionPass::new(EdgeDetectionPassData {
                 pipeline: Arc::clone(&edge_detection_data.pipeline),
                 blit_pipeline: Arc::clone(&edge_detection_data.blit_pipeline),
                 bind_group_layout: Arc::clone(&edge_detection_data.bind_group_layout),
                 sampler: Arc::clone(&edge_detection_data.sampler),
-            },
-            output_resource_id,
-            output_with_edges_resource_id,
-        )));
+            })),
+            &[
+                ("input", output_resource_id),
+                ("output", output_with_edges_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(BrightnessContrastPass::new(
-            BrightnessContrastPassData {
-                pipeline: Arc::clone(&brightness_contrast_data.pipeline),
-                blit_pipeline: Arc::clone(&brightness_contrast_data.blit_pipeline),
-                bind_group_layout: Arc::clone(&brightness_contrast_data.bind_group_layout),
-                sampler: Arc::clone(&brightness_contrast_data.sampler),
-            },
-            output_with_edges_resource_id,
-            output_with_brightness_contrast_resource_id,
-            brightness_contrast_uniform_buffer,
-        )));
+        graph.add_pass(
+            Box::new(BrightnessContrastPass::new(
+                BrightnessContrastPassData {
+                    pipeline: Arc::clone(&brightness_contrast_data.pipeline),
+                    blit_pipeline: Arc::clone(&brightness_contrast_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&brightness_contrast_data.bind_group_layout),
+                    sampler: Arc::clone(&brightness_contrast_data.sampler),
+                },
+                brightness_contrast_uniform_buffer,
+            )),
+            &[
+                ("input", output_with_edges_resource_id),
+                ("output", output_with_brightness_contrast_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(GaussianBlurHorizontalPass::new(
-            GaussianBlurPassData {
-                pipeline: Arc::clone(&gaussian_blur_data.pipeline),
-                blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
-                bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
-                sampler: Arc::clone(&gaussian_blur_data.sampler),
-            },
-            output_with_brightness_contrast_resource_id,
-            blur_horizontal_resource_id,
-            gaussian_blur_horizontal_uniform_buffer,
-        )));
+        graph.add_pass(
+            Box::new(GaussianBlurHorizontalPass::new(
+                GaussianBlurPassData {
+                    pipeline: Arc::clone(&gaussian_blur_data.pipeline),
+                    blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
+                    sampler: Arc::clone(&gaussian_blur_data.sampler),
+                },
+                gaussian_blur_horizontal_uniform_buffer,
+            )),
+            &[
+                ("input", output_with_brightness_contrast_resource_id),
+                ("output", blur_horizontal_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(GaussianBlurVerticalPass::new(
-            GaussianBlurPassData {
-                pipeline: Arc::clone(&gaussian_blur_data.pipeline),
-                blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
-                bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
-                sampler: Arc::clone(&gaussian_blur_data.sampler),
-            },
-            blur_horizontal_resource_id,
-            blur_vertical_resource_id,
-            gaussian_blur_vertical_uniform_buffer,
-        )));
+        graph.add_pass(
+            Box::new(GaussianBlurVerticalPass::new(
+                GaussianBlurPassData {
+                    pipeline: Arc::clone(&gaussian_blur_data.pipeline),
+                    blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
+                    sampler: Arc::clone(&gaussian_blur_data.sampler),
+                },
+                gaussian_blur_vertical_uniform_buffer,
+            )),
+            &[
+                ("input", blur_horizontal_resource_id),
+                ("output", blur_vertical_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(HistogramComputePass::new(
-            HistogramComputePassData {
-                pipeline: Arc::clone(&histogram_compute_data.pipeline),
-                bind_group_layout: Arc::clone(&histogram_compute_data.bind_group_layout),
-            },
-            blur_vertical_resource_id,
-            Arc::clone(&histogram_buffer),
-            Arc::clone(&histogram_readback_buffer),
-            gpu.surface_config.width,
-            gpu.surface_config.height,
-        )));
+        graph.add_pass(
+            Box::new(SharpenPass::new(
+                SharpenPassData {
+                    pipeline: Arc::clone(&sharpen_data.pipeline),
+                    blit_pipeline: Arc::clone(&sharpen_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&sharpen_data.bind_group_layout),
+                    sampler: Arc::clone(&sharpen_data.sampler),
+                },
+                Arc::clone(&sharpen_uniform_buffer),
+            )),
+            &[
+                ("input", blur_vertical_resource_id),
+                ("output", sharpen_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(ConvolutionPass::new(
-            ConvolutionPassData {
-                pipeline: Arc::clone(&convolution_data.pipeline),
-                blit_pipeline: Arc::clone(&convolution_data.blit_pipeline),
-                bind_group_layout: Arc::clone(&convolution_data.bind_group_layout),
-                sampler: Arc::clone(&convolution_data.sampler),
-            },
-            blur_vertical_resource_id,
-            convolution_resource_id,
-            convolution_kernel_buffer,
-        )));
+        graph.add_pass(
+            Box::new(ConvolutionPass::new(
+                ConvolutionPassData {
+                    pipeline: Arc::clone(&convolution_data.pipeline),
+                    blit_pipeline: Arc::clone(&convolution_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&convolution_data.bind_group_layout),
+                    sampler: Arc::clone(&convolution_data.sampler),
+                },
+                convolution_kernel_buffer,
+            )),
+            &[
+                ("input", sharpen_resource_id),
+                ("output", convolution_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(VignettePass::new(
-            VignettePassData {
-                pipeline: Arc::clone(&vignette_data.pipeline),
-                blit_pipeline: Arc::clone(&vignette_data.blit_pipeline),
-                bind_group_layout: Arc::clone(&vignette_data.bind_group_layout),
-                sampler: Arc::clone(&vignette_data.sampler),
-            },
-            convolution_resource_id,
-            vignette_resource_id,
-            vignette_uniform_buffer,
-        )));
+        graph.add_pass(
+            Box::new(VignettePass::new(
+                VignettePassData {
+                    pipeline: Arc::clone(&vignette_data.pipeline),
+                    blit_pipeline: Arc::clone(&vignette_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&vignette_data.bind_group_layout),
+                    sampler: Arc::clone(&vignette_data.sampler),
+                },
+                vignette_uniform_buffer,
+            )),
+            &[
+                ("input", convolution_resource_id),
+                ("output", vignette_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(GrayscalePass::new(
-            GrayscalePassData {
+        graph.add_pass(
+            Box::new(GrayscalePass::new(GrayscalePassData {
                 pipeline: Arc::clone(&grayscale_data.pipeline),
                 blit_pipeline: Arc::clone(&grayscale_data.blit_pipeline),
                 bind_group_layout: Arc::clone(&grayscale_data.bind_group_layout),
                 sampler: Arc::clone(&grayscale_data.sampler),
-            },
-            vignette_resource_id,
-            grayscale_resource_id,
-        )));
+            })),
+            &[
+                ("input", vignette_resource_id),
+                ("output", grayscale_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(ColorInvertPass::new(
-            ColorInvertPassData {
+        graph.add_pass(
+            Box::new(ColorInvertPass::new(ColorInvertPassData {
                 pipeline: Arc::clone(&color_invert_data.pipeline),
                 blit_pipeline: Arc::clone(&color_invert_data.blit_pipeline),
                 bind_group_layout: Arc::clone(&color_invert_data.bind_group_layout),
                 sampler: Arc::clone(&color_invert_data.sampler),
-            },
-            grayscale_resource_id,
-            color_invert_resource_id,
-        )));
+            })),
+            &[
+                ("input", grayscale_resource_id),
+                ("output", color_invert_resource_id),
+            ],
+        );
 
-        graph.add_pass(Box::new(EguiPass::new(
-            egui_pass_data,
-            color_invert_resource_id,
-        )));
+        graph.add_pass(
+            Box::new(EguiPass::new()),
+            &[("color_target", color_invert_resource_id)],
+        );
 
-        graph.add_pass(Box::new(BlitPass::new(
-            BlitPassData {
-                pipeline: Arc::clone(&blit_data.pipeline),
-                bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
-                sampler: Arc::clone(&blit_data.sampler),
-            },
-            "blit_to_surface".to_string(),
-            color_invert_resource_id,
-            surface_resource_id,
-        )));
+        graph.add_pass(
+            Box::new(BlitPass::new(
+                BlitPassData {
+                    pipeline: Arc::clone(&blit_data.pipeline),
+                    bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
+                    sampler: Arc::clone(&blit_data.sampler),
+                },
+                "blit_to_surface".to_string(),
+            )),
+            &[
+                ("input", color_invert_resource_id),
+                ("output", surface_resource_id),
+            ],
+        );
 
         graph.compile().expect("Failed to compile render graph");
 
         log::info!("Render graph compiled successfully");
-        log::info!("Execution order: {:?}", graph.get_execution_order());
+
+        let mut pass_configs = PassConfigs::default();
+        pass_configs.egui.renderer = Some(egui_renderer);
 
         Self {
             gpu,
             depth_texture_view,
             scene,
             render_graph: graph,
+            pass_configs,
             surface_resource_id,
             depth_resource_id,
             hdr_resource_id,
@@ -1220,410 +1231,211 @@ impl Renderer {
             vignette_resource_id,
             grayscale_resource_id,
             color_invert_resource_id,
-            histogram_readback_buffer,
+            sharpen_resource_id,
+            _sharpen_uniform_buffer: sharpen_uniform_buffer,
         }
     }
 
     pub fn set_edge_detection_enabled(&mut self, enabled: bool) {
-        if let Some(edge_detection_pass) = self
-            .render_graph
-            .get_pass_mut::<EdgeDetectionPass>("edge_detection_pass")
-        {
-            edge_detection_pass.set_enabled(enabled);
-        }
+        self.pass_configs.edge_detection.enabled = enabled;
     }
 
     pub fn is_edge_detection_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<EdgeDetectionPass>("edge_detection_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
+        self.pass_configs.edge_detection.enabled
     }
 
     pub fn set_brightness_contrast_enabled(&mut self, enabled: bool) {
-        if let Some(brightness_contrast_pass) = self
-            .render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-        {
-            brightness_contrast_pass.set_enabled(enabled);
-        }
+        self.pass_configs.brightness_contrast.enabled = enabled;
     }
 
     pub fn is_brightness_contrast_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
+        self.pass_configs.brightness_contrast.enabled
     }
 
     pub fn set_brightness(&mut self, brightness: f32) {
-        if let Some(brightness_contrast_pass) = self
-            .render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-        {
-            brightness_contrast_pass.brightness = brightness;
-        }
+        self.pass_configs.brightness_contrast.brightness = brightness;
     }
 
     pub fn get_brightness(&mut self) -> f32 {
-        self.render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-            .map(|pass| pass.brightness)
-            .unwrap_or(0.0)
+        self.pass_configs.brightness_contrast.brightness
     }
 
     pub fn set_contrast(&mut self, contrast: f32) {
-        if let Some(brightness_contrast_pass) = self
-            .render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-        {
-            brightness_contrast_pass.contrast = contrast;
-        }
+        self.pass_configs.brightness_contrast.contrast = contrast;
     }
 
     pub fn get_contrast(&mut self) -> f32 {
-        self.render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-            .map(|pass| pass.contrast)
-            .unwrap_or(1.0)
+        self.pass_configs.brightness_contrast.contrast
     }
 
     pub fn set_gaussian_blur_enabled(&mut self, enabled: bool) {
-        if let Some(gaussian_blur_horizontal_pass) = self
-            .render_graph
-            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
-        {
-            gaussian_blur_horizontal_pass.set_enabled(enabled);
-        }
-        if let Some(gaussian_blur_vertical_pass) = self
-            .render_graph
-            .get_pass_mut::<GaussianBlurVerticalPass>("gaussian_blur_vertical_pass")
-        {
-            gaussian_blur_vertical_pass.set_enabled(enabled);
-        }
+        self.pass_configs.gaussian_blur.enabled = enabled;
     }
 
     pub fn is_gaussian_blur_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
+        self.pass_configs.gaussian_blur.enabled
     }
 
-    pub fn set_histogram_compute_enabled(&mut self, enabled: bool) {
-        if let Some(histogram_compute_pass) = self
-            .render_graph
-            .get_pass_mut::<HistogramComputePass>("histogram_compute_pass")
-        {
-            histogram_compute_pass.set_enabled(enabled);
-        }
+    pub fn set_sharpen_enabled(&mut self, enabled: bool) {
+        self.pass_configs.sharpen.enabled = enabled;
     }
 
-    pub fn is_histogram_compute_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<HistogramComputePass>("histogram_compute_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
+    pub fn is_sharpen_enabled(&mut self) -> bool {
+        self.pass_configs.sharpen.enabled
+    }
+
+    pub fn set_sharpen_strength(&mut self, strength: f32) {
+        self.pass_configs.sharpen.strength = strength;
+    }
+
+    pub fn get_sharpen_strength(&mut self) -> f32 {
+        self.pass_configs.sharpen.strength
     }
 
     pub fn set_convolution_enabled(&mut self, enabled: bool) {
-        if let Some(convolution_pass) = self
-            .render_graph
-            .get_pass_mut::<ConvolutionPass>("convolution_pass")
-        {
-            convolution_pass.set_enabled(enabled);
-        }
+        self.pass_configs.convolution.enabled = enabled;
     }
 
     pub fn is_convolution_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<ConvolutionPass>("convolution_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
+        self.pass_configs.convolution.enabled
     }
 
     pub fn set_convolution_kernel(&mut self, kernel: [f32; 9]) {
-        if let Some(convolution_pass) = self
-            .render_graph
-            .get_pass_mut::<ConvolutionPass>("convolution_pass")
-        {
-            convolution_pass.set_kernel(kernel);
-        }
+        self.pass_configs.convolution.kernel = kernel;
     }
 
     pub fn get_convolution_kernel(&mut self) -> [f32; 9] {
-        self.render_graph
-            .get_pass_mut::<ConvolutionPass>("convolution_pass")
-            .map(|pass| pass.kernel)
-            .unwrap_or([0.0; 9])
+        self.pass_configs.convolution.kernel
     }
 
     pub fn set_vignette_enabled(&mut self, enabled: bool) {
-        if let Some(vignette_pass) = self
-            .render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-        {
-            vignette_pass.set_enabled(enabled);
-        }
+        self.pass_configs.vignette.enabled = enabled;
     }
 
     pub fn is_vignette_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
+        self.pass_configs.vignette.enabled
     }
 
     pub fn set_vignette_strength(&mut self, strength: f32) {
-        if let Some(vignette_pass) = self
-            .render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-        {
-            vignette_pass.strength = strength;
-        }
+        self.pass_configs.vignette.strength = strength;
     }
 
     pub fn get_vignette_strength(&mut self) -> f32 {
-        self.render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-            .map(|pass| pass.strength)
-            .unwrap_or(1.5)
+        self.pass_configs.vignette.strength
     }
 
     pub fn set_vignette_radius(&mut self, radius: f32) {
-        if let Some(vignette_pass) = self
-            .render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-        {
-            vignette_pass.radius = radius;
-        }
+        self.pass_configs.vignette.radius = radius;
     }
 
     pub fn get_vignette_radius(&mut self) -> f32 {
-        self.render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-            .map(|pass| pass.radius)
-            .unwrap_or(0.3)
+        self.pass_configs.vignette.radius
     }
 
     pub fn set_vignette_color_tint(&mut self, color_tint: [f32; 3]) {
-        if let Some(vignette_pass) = self
-            .render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-        {
-            vignette_pass.color_tint = color_tint;
-        }
+        self.pass_configs.vignette.color_tint = color_tint;
     }
 
     pub fn get_vignette_color_tint(&mut self) -> [f32; 3] {
-        self.render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-            .map(|pass| pass.color_tint)
-            .unwrap_or([0.0, 0.0, 0.0])
+        self.pass_configs.vignette.color_tint
     }
 
     pub fn set_grayscale_enabled(&mut self, enabled: bool) {
-        if let Some(grayscale_pass) = self
-            .render_graph
-            .get_pass_mut::<GrayscalePass>("grayscale_pass")
-        {
-            grayscale_pass.set_enabled(enabled);
-        }
+        self.pass_configs.grayscale.enabled = enabled;
     }
 
     pub fn is_grayscale_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<GrayscalePass>("grayscale_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
+        self.pass_configs.grayscale.enabled
     }
 
     pub fn set_color_invert_enabled(&mut self, enabled: bool) {
-        if let Some(color_invert_pass) = self
-            .render_graph
-            .get_pass_mut::<ColorInvertPass>("color_invert_pass")
-        {
-            color_invert_pass.set_enabled(enabled);
-        }
+        self.pass_configs.color_invert.enabled = enabled;
     }
 
     pub fn is_color_invert_enabled(&mut self) -> bool {
-        self.render_graph
-            .get_pass_mut::<ColorInvertPass>("color_invert_pass")
-            .map(|pass| pass.is_enabled())
-            .unwrap_or(false)
-    }
-
-    pub fn get_histogram_data(&self) -> Option<Vec<u32>> {
-        let buffer_slice = self.histogram_readback_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).ok();
-        });
-        let _ = self.gpu.device.poll(wgpu::MaintainBase::Wait);
-
-        if receiver.recv().ok()?.is_ok() {
-            let data = buffer_slice.get_mapped_range();
-            let histogram: Vec<u32> = bytemuck::cast_slice(&data).to_vec();
-            drop(data);
-            self.histogram_readback_buffer.unmap();
-            Some(histogram)
-        } else {
-            None
-        }
+        self.pass_configs.color_invert.enabled
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
         self.depth_texture_view = self.gpu.create_depth_texture(width, height);
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.hdr_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.output_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.output_with_edges_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.output_with_brightness_contrast_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.blur_horizontal_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.blur_vertical_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.convolution_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.vignette_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.grayscale_resource_id,
             width,
             height,
         );
 
-        self.render_graph.resources_mut().resize_transient_resource(
+        self.render_graph.resize_transient_resource(
             &self.gpu.device,
             self.color_invert_resource_id,
             width,
             height,
         );
 
-        if let Some(post_process_pass) = self
-            .render_graph
-            .get_pass_mut::<PostProcessPass>("post_process_pass")
-        {
-            post_process_pass.invalidate_bind_group();
-        }
-
-        if let Some(edge_detection_pass) = self
-            .render_graph
-            .get_pass_mut::<EdgeDetectionPass>("edge_detection_pass")
-        {
-            edge_detection_pass.invalidate_bind_group();
-        }
-
-        if let Some(brightness_contrast_pass) = self
-            .render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-        {
-            brightness_contrast_pass.invalidate_bind_groups();
-        }
-
-        if let Some(gaussian_blur_horizontal_pass) = self
-            .render_graph
-            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
-        {
-            gaussian_blur_horizontal_pass.invalidate_bind_groups();
-        }
-
-        if let Some(gaussian_blur_vertical_pass) = self
-            .render_graph
-            .get_pass_mut::<GaussianBlurVerticalPass>("gaussian_blur_vertical_pass")
-        {
-            gaussian_blur_vertical_pass.invalidate_bind_groups();
-        }
-
-        if let Some(histogram_compute_pass) = self
-            .render_graph
-            .get_pass_mut::<HistogramComputePass>("histogram_compute_pass")
-        {
-            histogram_compute_pass.invalidate_bind_group();
-            histogram_compute_pass.update_dimensions(width, height);
-        }
-
-        if let Some(convolution_pass) = self
-            .render_graph
-            .get_pass_mut::<ConvolutionPass>("convolution_pass")
-        {
-            convolution_pass.invalidate_bind_groups();
-        }
-
-        if let Some(vignette_pass) = self
-            .render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-        {
-            vignette_pass.invalidate_bind_groups();
-        }
-
-        if let Some(grayscale_pass) = self
-            .render_graph
-            .get_pass_mut::<GrayscalePass>("grayscale_pass")
-        {
-            grayscale_pass.invalidate_bind_groups();
-        }
-
-        if let Some(color_invert_pass) = self
-            .render_graph
-            .get_pass_mut::<ColorInvertPass>("color_invert_pass")
-        {
-            color_invert_pass.invalidate_bind_groups();
-        }
-
-        if let Some(blit_pass) = self
-            .render_graph
-            .get_pass_mut::<BlitPass>("blit_to_surface")
-        {
-            blit_pass.invalidate_bind_group();
-        }
+        self.render_graph.resize_transient_resource(
+            &self.gpu.device,
+            self.sharpen_resource_id,
+            width,
+            height,
+        );
     }
 
     pub fn render_frame(
@@ -1638,22 +1450,14 @@ impl Renderer {
         self.scene
             .update(&self.gpu.queue, self.gpu.aspect_ratio(), delta_time);
 
-        let egui_pass = self
-            .render_graph
-            .get_pass_mut::<EguiPass>("egui_pass")
-            .expect("Egui pass not found");
+        if let Some(renderer) = &mut self.pass_configs.egui.renderer {
+            for (id, image_delta) in &textures_delta.set {
+                renderer.update_texture(&self.gpu.device, &self.gpu.queue, *id, image_delta);
+            }
 
-        for (id, image_delta) in &textures_delta.set {
-            egui_pass.data.renderer.update_texture(
-                &self.gpu.device,
-                &self.gpu.queue,
-                *id,
-                image_delta,
-            );
-        }
-
-        for id in &textures_delta.free {
-            egui_pass.data.renderer.free_texture(id);
+            for id in &textures_delta.free {
+                renderer.free_texture(id);
+            }
         }
 
         let mut encoder = self
@@ -1663,55 +1467,14 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
-        let egui_pass = self
-            .render_graph
-            .get_pass_mut::<EguiPass>("egui_pass")
-            .expect("Egui pass not found");
-
-        egui_pass.data.renderer.update_buffers(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &mut encoder,
-            &paint_jobs,
-            &screen_descriptor,
-        );
-
-        egui_pass.data.paint_jobs = paint_jobs;
-        egui_pass.data.screen_descriptor = screen_descriptor;
-
-        if let Some(brightness_contrast_pass) = self
-            .render_graph
-            .get_pass_mut::<BrightnessContrastPass>("brightness_contrast_pass")
-        {
-            brightness_contrast_pass.update_uniforms(&self.gpu.queue);
-        }
-
-        if let Some(gaussian_blur_horizontal_pass) = self
-            .render_graph
-            .get_pass_mut::<GaussianBlurHorizontalPass>("gaussian_blur_horizontal_pass")
-        {
-            gaussian_blur_horizontal_pass.update_uniforms(&self.gpu.queue);
-        }
-
-        if let Some(gaussian_blur_vertical_pass) = self
-            .render_graph
-            .get_pass_mut::<GaussianBlurVerticalPass>("gaussian_blur_vertical_pass")
-        {
-            gaussian_blur_vertical_pass.update_uniforms(&self.gpu.queue);
-        }
-
-        if let Some(convolution_pass) = self
-            .render_graph
-            .get_pass_mut::<ConvolutionPass>("convolution_pass")
-        {
-            convolution_pass.update_uniforms(&self.gpu.queue);
-        }
-
-        if let Some(vignette_pass) = self
-            .render_graph
-            .get_pass_mut::<VignettePass>("vignette_pass")
-        {
-            vignette_pass.update_uniforms(&self.gpu.queue);
+        if let Some(renderer) = &mut self.pass_configs.egui.renderer {
+            renderer.update_buffers(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                &paint_jobs,
+                &screen_descriptor,
+            );
         }
 
         let surface_texture = match self.gpu.surface.get_current_texture() {
@@ -1750,9 +1513,16 @@ impl Renderer {
             .resources_mut()
             .set_external_texture(self.depth_resource_id, self.depth_texture_view.clone());
 
-        self.render_graph.execute(&self.gpu.device, &mut encoder);
+        self.pass_configs.egui.paint_jobs = paint_jobs;
+        self.pass_configs.egui.screen_descriptor = screen_descriptor;
 
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
+        let mut command_buffers =
+            self.render_graph
+                .execute(&self.gpu.device, &self.gpu.queue, &self.pass_configs);
+        command_buffers.push(encoder.finish());
+
+        self.gpu.queue.submit(command_buffers);
+
         surface_texture.present();
     }
 }
