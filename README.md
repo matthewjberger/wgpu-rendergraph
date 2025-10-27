@@ -1,10 +1,8 @@
-# Rust / Winit / Egui / Wgpu Triangle
+# Rust / Winit / Egui / Wgpu Rendergraph
 
-This project demonstrates how to setup a [rust](https://www.rust-lang.org/) project
-that uses [wgpu](https://wgpu.rs/) to render a spinning triangle, supporting
+This project demonstrates how to setup a rendergraph [rust](https://www.rust-lang.org/) project
+that uses [wgpu](https://wgpu.rs/) to render a scene using a rendergraph, supporting
 both webgl and webgpu [wasm](https://webassembly.org/) as well as native.
-
-<img width="802" height="632" alt="native" src="https://github.com/user-attachments/assets/aaad05db-8a5b-4306-a166-2692b4e365fb" />
 
 ## Quickstart
 
@@ -25,8 +23,3 @@ trunk serve --features webgl --open
 ## Prerequisites (web)
 
 * [trunk](https://trunkrs.dev/)
-
-## Screenshots
-
-<img width="1665" height="1287" alt="webgl" src="https://github.com/user-attachments/assets/d8771e73-4b0b-459a-baf2-5ce1f79f943e" />
-<img width="1665" height="1287" alt="webgpu" src="https://github.com/user-attachments/assets/494f2a88-087c-4045-8433-e96f042b7988" />
