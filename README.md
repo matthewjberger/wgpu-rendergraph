@@ -4,6 +4,8 @@ This project demonstrates how to setup a rendergraph [rust](https://www.rust-lan
 that uses [wgpu](https://wgpu.rs/) to render a scene using a rendergraph, supporting
 both webgl and webgpu [wasm](https://webassembly.org/) as well as native.
 
+<img width="2560" height="1392" alt="rendergraph" src="https://github.com/user-attachments/assets/2724809f-41b1-4657-89e8-a852fa365d06" />
+
 ## Quickstart
 
 ```
