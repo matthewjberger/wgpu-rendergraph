@@ -561,6 +561,71 @@ impl<'r, 'e, C> PassExecutionContext<'r, 'e, C> {
         self.resources.get_depth_attachment(resource_id)
     }
 
+    pub fn get_buffer(&self, slot: &str) -> Result<&'r std::sync::Arc<wgpu::Buffer>> {
+        let resource_id = self.get_slot(slot)?;
+        let handle = self.resources.get_handle(resource_id).ok_or_else(|| {
+            RenderGraphError::ResourceNotBound {
+                resource: slot.to_string(),
+                id: resource_id,
+            }
+        })?;
+
+        match handle {
+            ResourceHandle::ExternalBuffer { buffer }
+            | ResourceHandle::TransientBuffer { buffer } => Ok(buffer),
+            _ => Err(RenderGraphError::TypeMismatch {
+                operation: "get_buffer".to_string(),
+                actual_type: "texture".to_string(),
+                resource: slot.to_string(),
+            }),
+        }
+    }
+
+    pub fn get_texture_size(&self, slot: &str) -> Result<(u32, u32)> {
+        let resource_id = self.get_slot(slot)?;
+        let descriptor = self.resources.get_descriptor(resource_id).ok_or_else(|| {
+            RenderGraphError::DescriptorNotFound {
+                resource: slot.to_string(),
+                id: resource_id,
+            }
+        })?;
+
+        match &descriptor.resource_type {
+            ResourceType::TransientColor {
+                descriptor: texture_desc,
+                ..
+            }
+            | ResourceType::TransientDepth {
+                descriptor: texture_desc,
+                ..
+            } => Ok((texture_desc.width, texture_desc.height)),
+            ResourceType::ExternalColor { .. } | ResourceType::ExternalDepth { .. } => {
+                let handle = self.resources.get_handle(resource_id).ok_or_else(|| {
+                    RenderGraphError::ResourceNotBound {
+                        resource: slot.to_string(),
+                        id: resource_id,
+                    }
+                })?;
+
+                match handle {
+                    ResourceHandle::TransientTexture { texture, .. } => {
+                        Ok((texture.width(), texture.height()))
+                    }
+                    _ => Err(RenderGraphError::TypeMismatch {
+                        operation: "get_texture_size".to_string(),
+                        actual_type: "external_texture".to_string(),
+                        resource: slot.to_string(),
+                    }),
+                }
+            }
+            _ => Err(RenderGraphError::TypeMismatch {
+                operation: "get_texture_size".to_string(),
+                actual_type: "buffer".to_string(),
+                resource: slot.to_string(),
+            }),
+        }
+    }
+
     pub fn run_sub_graph(&mut self, sub_graph_name: String, inputs: Vec<SlotValue<'r>>) {
         self.sub_graph_commands.push(SubGraphRunCommand {
             sub_graph_name,

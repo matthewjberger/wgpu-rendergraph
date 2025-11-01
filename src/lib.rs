@@ -776,6 +776,14 @@ impl ApplicationHandler for App {
                             {
                                 renderer.set_color_invert_enabled(color_invert_enabled);
                             }
+
+                            let mut compute_grayscale_enabled = renderer.is_compute_grayscale_enabled();
+                            if ui
+                                .checkbox(&mut compute_grayscale_enabled, "Compute Grayscale")
+                                .changed()
+                            {
+                                renderer.set_compute_grayscale_enabled(compute_grayscale_enabled);
+                            }
                         });
                     });
 
@@ -923,11 +931,11 @@ impl ApplicationHandler for App {
 use pass_configs::PassConfigs;
 use passes::{
     BlitPass, BlitPassData, BrightnessContrastPass, BrightnessContrastPassData, ColorInvertPass,
-    ColorInvertPassData, ConvolutionPass, ConvolutionPassData, EdgeDetectionPass,
-    EdgeDetectionPassData, EguiPass, GaussianBlurHorizontalPass, GaussianBlurPassData,
-    GaussianBlurVerticalPass, GrayscalePass, GrayscalePassData, PostProcessPass,
-    PostProcessPassData, ScenePass, ScenePassData, SharpenPass, SharpenPassData, VignettePass,
-    VignettePassData,
+    ColorInvertPassData, ComputeGrayscalePass, ComputeGrayscalePassData, ConvolutionPass,
+    ConvolutionPassData, EdgeDetectionPass, EdgeDetectionPassData, EguiPass,
+    GaussianBlurHorizontalPass, GaussianBlurPassData, GaussianBlurVerticalPass, GrayscalePass,
+    GrayscalePassData, PostProcessPass, PostProcessPassData, ScenePass, ScenePassData, SharpenPass,
+    SharpenPassData, VignettePass, VignettePassData,
 };
 use wgpu_render_graph::{RenderGraph, ResourceId};
 
@@ -968,6 +976,7 @@ pub struct Renderer {
     viewport_display_view: wgpu::TextureView,
     sharpen_resource_id: ResourceId,
     egui_output_resource_id: ResourceId,
+    compute_grayscale_resource_id: ResourceId,
     viewport_texture_id: Option<egui::TextureId>,
     _sharpen_uniform_buffer: Arc<wgpu::Buffer>,
     viewport_targets: HashMap<egui_tiles::TileId, ViewportRenderTarget>,
@@ -1246,6 +1255,22 @@ impl Renderer {
             sampler: blit_sampler,
         };
 
+        let (compute_grayscale_pipeline, compute_grayscale_bind_group_layout) =
+            ComputeGrayscalePass::create_pipeline(&gpu.device);
+
+        let compute_grayscale_uniform_buffer =
+            Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Compute Grayscale Uniform Buffer"),
+                size: std::mem::size_of::<[u32; 4]>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+        let compute_grayscale_data = ComputeGrayscalePassData {
+            pipeline: compute_grayscale_pipeline,
+            bind_group_layout: compute_grayscale_bind_group_layout,
+        };
+
         let mut graph = RenderGraph::new();
 
         let output_resource_id = graph
@@ -1436,6 +1461,15 @@ impl Renderer {
             .clear_depth(1.0)
             .external();
 
+        let compute_grayscale_resource_id = graph
+            .add_color_texture("compute_grayscale")
+            .format(wgpu::TextureFormat::Rgba8Unorm)
+            .size(gpu.surface_config.width, gpu.surface_config.height)
+            .usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING)
+            .sample_count(1)
+            .mip_levels(1)
+            .transient();
+
         graph
             .add_pass(
                 Box::new(ScenePass::new(ScenePassData {
@@ -1469,6 +1503,19 @@ impl Renderer {
 
         graph
             .add_pass(
+                Box::new(ComputeGrayscalePass::new(
+                    compute_grayscale_data,
+                    compute_grayscale_uniform_buffer,
+                )),
+                &[
+                    ("input", output_resource_id),
+                    ("output", compute_grayscale_resource_id),
+                ],
+            )
+            .expect("Failed to add compute grayscale pass");
+
+        graph
+            .add_pass(
                 Box::new(EdgeDetectionPass::new(EdgeDetectionPassData {
                     pipeline: Arc::clone(&edge_detection_data.pipeline),
                     blit_pipeline: Arc::clone(&edge_detection_data.blit_pipeline),
@@ -1476,7 +1523,7 @@ impl Renderer {
                     sampler: Arc::clone(&edge_detection_data.sampler),
                 })),
                 &[
-                    ("input", output_resource_id),
+                    ("input", compute_grayscale_resource_id),
                     ("output", output_with_edges_resource_id),
                 ],
             )
@@ -1691,6 +1738,7 @@ impl Renderer {
             viewport_display_view,
             sharpen_resource_id,
             egui_output_resource_id,
+            compute_grayscale_resource_id,
             viewport_texture_id: None,
             _sharpen_uniform_buffer: sharpen_uniform_buffer,
             viewport_targets: HashMap::new(),
@@ -1816,6 +1864,14 @@ impl Renderer {
 
     pub fn is_color_invert_enabled(&mut self) -> bool {
         self.pass_configs.color_invert.enabled
+    }
+
+    pub fn set_compute_grayscale_enabled(&mut self, enabled: bool) {
+        self.pass_configs.compute_grayscale.enabled = enabled;
+    }
+
+    pub fn is_compute_grayscale_enabled(&mut self) -> bool {
+        self.pass_configs.compute_grayscale.enabled
     }
 
     pub fn viewport_texture_id(&self) -> Option<egui::TextureId> {
@@ -2362,7 +2418,7 @@ impl Gpu {
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("WGPU Device"),
                     memory_hints: wgpu::MemoryHints::default(),
-                    required_features: wgpu::Features::default(),
+                    required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                     #[cfg(not(target_arch = "wasm32"))]
                     required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                     #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]

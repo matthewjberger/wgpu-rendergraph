@@ -80,6 +80,11 @@ pub struct EdgeDetectionConfig {
     pub enabled: bool,
 }
 
+#[derive(Default)]
+pub struct ComputeGrayscaleConfig {
+    pub enabled: bool,
+}
+
 pub struct EguiConfig {
     pub paint_jobs: Vec<egui::ClippedPrimitive>,
     pub screen_descriptor: egui_wgpu::ScreenDescriptor,
@@ -109,5 +114,6 @@ pub struct PassConfigs {
     pub grayscale: GrayscaleConfig,
     pub color_invert: ColorInvertConfig,
     pub edge_detection: EdgeDetectionConfig,
+    pub compute_grayscale: ComputeGrayscaleConfig,
     pub egui: EguiConfig,
 }

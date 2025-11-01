@@ -1,6 +1,7 @@
 pub mod blit_pass;
 pub mod brightness_contrast_pass;
 pub mod color_invert_pass;
+pub mod compute_grayscale_pass;
 pub mod convolution_pass;
 pub mod edge_detection_pass;
 pub mod egui_pass;
@@ -15,6 +16,7 @@ pub mod vignette_pass;
 pub use blit_pass::{BlitPass, BlitPassData};
 pub use brightness_contrast_pass::{BrightnessContrastPass, BrightnessContrastPassData};
 pub use color_invert_pass::{ColorInvertPass, ColorInvertPassData};
+pub use compute_grayscale_pass::{ComputeGrayscalePass, ComputeGrayscalePassData};
 pub use convolution_pass::{ConvolutionPass, ConvolutionPassData};
 pub use edge_detection_pass::{EdgeDetectionPass, EdgeDetectionPassData};
 pub use egui_pass::EguiPass;
