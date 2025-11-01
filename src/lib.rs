@@ -19,15 +19,29 @@ use kira::{
 };
 use std::collections::HashMap;
 
+#[derive(Clone)]
+pub struct Camera {
+    pub id: usize,
+    pub name: String,
+    pub position: nalgebra_glm::Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub fov: f32,
+}
+
 struct ViewportPane {
     name: String,
+    selected_camera_id: Option<usize>,
 }
 
 struct TileTreeBehavior {
     viewport_dimensions: HashMap<egui_tiles::TileId, (f32, f32)>,
     viewport_texture_id: Option<egui::TextureId>,
+    viewport_texture_ids: HashMap<egui_tiles::TileId, egui::TextureId>,
     max_viewport_size: (f32, f32),
     add_viewport_requested: bool,
+    cameras: Vec<Camera>,
+    camera_texture_aspect: f32,
 }
 
 impl egui_tiles::Behavior<ViewportPane> for TileTreeBehavior {
@@ -61,41 +75,68 @@ impl egui_tiles::Behavior<ViewportPane> for TileTreeBehavior {
         _tile_id: egui_tiles::TileId,
         pane: &mut ViewportPane,
     ) -> egui_tiles::UiResponse {
-        let available_size = ui.available_size();
-        self.viewport_dimensions
-            .insert(_tile_id, (available_size.x, available_size.y));
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Camera:");
+                egui::ComboBox::from_id_salt((_tile_id, "camera_selector"))
+                    .selected_text(
+                        pane.selected_camera_id
+                            .and_then(|id| self.cameras.iter().find(|c| c.id == id))
+                            .map(|c| c.name.as_str())
+                            .unwrap_or("None"),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut pane.selected_camera_id, None, "None");
+                        for camera in &self.cameras {
+                            ui.selectable_value(
+                                &mut pane.selected_camera_id,
+                                Some(camera.id),
+                                &camera.name,
+                            );
+                        }
+                    });
+            });
 
-        if let Some(texture_id) = self.viewport_texture_id {
-            let max_width = self.max_viewport_size.0;
-            let max_height = self.max_viewport_size.1;
+            let available_size = ui.available_size();
+            self.viewport_dimensions
+                .insert(_tile_id, (available_size.x, available_size.y));
 
-            if max_width > 0.0 && max_height > 0.0 {
-                let u_scale = available_size.x / max_width;
-                let v_scale = available_size.y / max_height;
+            if pane.selected_camera_id.is_none() {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No camera selected");
+                });
+            } else if let Some(texture_id) = self.viewport_texture_ids.get(&_tile_id) {
+                let camera = pane
+                    .selected_camera_id
+                    .and_then(|id| self.cameras.iter().find(|c| c.id == id));
 
-                let u_offset = (1.0 - u_scale) / 2.0;
-                let v_offset = (1.0 - v_scale) / 2.0;
+                let display_size = if let Some(_camera) = camera {
+                    let camera_aspect = self.camera_texture_aspect;
+                    let viewport_aspect = available_size.x / available_size.y.max(0.1);
 
-                let uv = egui::Rect::from_min_max(
-                    egui::pos2(u_offset, v_offset),
-                    egui::pos2(u_offset + u_scale.min(1.0), v_offset + v_scale.min(1.0)),
-                );
+                    if camera_aspect > viewport_aspect {
+                        let width = available_size.y * camera_aspect;
+                        egui::vec2(width, available_size.y)
+                    } else {
+                        let height = available_size.x / camera_aspect;
+                        egui::vec2(available_size.x, height)
+                    }
+                } else {
+                    available_size
+                };
 
                 ui.centered_and_justified(|ui| {
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture {
-                            id: texture_id,
-                            size: available_size,
-                        })
-                        .uv(uv),
-                    );
+                    ui.add(egui::Image::new(egui::load::SizedTexture {
+                        id: *texture_id,
+                        size: display_size,
+                    }));
+                });
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(format!("Viewport: {}", pane.name));
                 });
             }
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.label(format!("Viewport: {}", pane.name));
-            });
-        }
+        });
 
         egui_tiles::UiResponse::None
     }
@@ -116,16 +157,63 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let origin = nalgebra_glm::vec3(0.0_f32, 0.0_f32, 0.0_f32);
+
+        let camera1_pos = nalgebra_glm::vec3(0.0_f32, 2.0_f32, 5.0_f32);
+        let camera1_dir = nalgebra_glm::normalize(&(origin - camera1_pos));
+        let camera1_yaw = camera1_dir.z.atan2(camera1_dir.x);
+        let camera1_pitch = camera1_dir.y.asin();
+
+        let camera2_pos = nalgebra_glm::vec3(5.0_f32, 2.0_f32, 0.0_f32);
+        let camera2_dir = nalgebra_glm::normalize(&(origin - camera2_pos));
+        let camera2_yaw = camera2_dir.z.atan2(camera2_dir.x);
+        let camera2_pitch = camera2_dir.y.asin();
+
+        let camera3_pos = nalgebra_glm::vec3(0.5_f32, 5.0_f32, 0.5_f32);
+        let camera3_dir = nalgebra_glm::normalize(&(origin - camera3_pos));
+        let camera3_yaw = camera3_dir.z.atan2(camera3_dir.x);
+        let camera3_pitch = camera3_dir.y.asin();
+
+        let cameras = vec![
+            Camera {
+                id: 0,
+                name: "Camera 1".to_string(),
+                position: camera1_pos,
+                yaw: camera1_yaw,
+                pitch: camera1_pitch,
+                fov: 45.0,
+            },
+            Camera {
+                id: 1,
+                name: "Camera 2".to_string(),
+                position: camera2_pos,
+                yaw: camera2_yaw,
+                pitch: camera2_pitch,
+                fov: 45.0,
+            },
+            Camera {
+                id: 2,
+                name: "Camera 3".to_string(),
+                position: camera3_pos,
+                yaw: camera3_yaw,
+                pitch: camera3_pitch,
+                fov: 60.0,
+            },
+        ];
+
         let mut tiles = egui_tiles::Tiles::default();
 
         let viewport1 = ViewportPane {
             name: "Viewport 1".to_string(),
+            selected_camera_id: Some(0),
         };
         let viewport2 = ViewportPane {
             name: "Viewport 2".to_string(),
+            selected_camera_id: Some(1),
         };
         let viewport3 = ViewportPane {
             name: "Viewport 3".to_string(),
+            selected_camera_id: Some(2),
         };
 
         let pane1 = tiles.insert_pane(viewport1);
@@ -149,8 +237,11 @@ impl Default for App {
             tile_tree_behavior: TileTreeBehavior {
                 viewport_dimensions: HashMap::new(),
                 viewport_texture_id: None,
+                viewport_texture_ids: HashMap::new(),
                 max_viewport_size: (0.0, 0.0),
                 add_viewport_requested: false,
+                cameras,
+                camera_texture_aspect: 1.0,
             },
         }
     }
@@ -710,6 +801,7 @@ impl ApplicationHandler for App {
 
                             let new_pane = ViewportPane {
                                 name: format!("Viewport {}", viewport_count + 1),
+                                selected_camera_id: None,
                             };
                             let new_tile = tree.tiles.insert_pane(new_pane);
 
@@ -761,7 +853,65 @@ impl ApplicationHandler for App {
                     }
                 };
 
-                renderer.render_frame(screen_descriptor, paint_jobs, textures_delta, delta_time);
+                let viewports = if let Some(tree) = &self.tile_tree {
+                    tree.tiles
+                        .iter()
+                        .filter_map(|(tile_id, tile)| {
+                            if let egui_tiles::Tile::Pane(pane) = tile {
+                                if let Some(camera_id) = pane.selected_camera_id {
+                                    let (width, height) = self
+                                        .tile_tree_behavior
+                                        .viewport_dimensions
+                                        .get(tile_id)
+                                        .copied()
+                                        .unwrap_or((0.0, 0.0));
+
+                                    Some(ViewportCamera {
+                                        tile_id: *tile_id,
+                                        camera_id,
+                                        viewport_width: width,
+                                        viewport_height: height,
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                self.tile_tree_behavior.camera_texture_aspect = renderer.gpu.surface_config.width
+                    as f32
+                    / renderer.gpu.surface_config.height.max(1) as f32;
+
+                renderer.render_frame(
+                    screen_descriptor,
+                    paint_jobs,
+                    textures_delta,
+                    delta_time,
+                    viewports,
+                    &self.tile_tree_behavior.cameras,
+                );
+
+                if let Some(tree) = &self.tile_tree {
+                    for (tile_id, texture_id) in tree.tiles.iter().filter_map(|(tile_id, tile)| {
+                        if matches!(tile, egui_tiles::Tile::Pane(_)) {
+                            renderer
+                                .get_viewport_texture_id(*tile_id)
+                                .map(|tex_id| (*tile_id, tex_id))
+                        } else {
+                            None
+                        }
+                    }) {
+                        self.tile_tree_behavior
+                            .viewport_texture_ids
+                            .insert(tile_id, texture_id);
+                    }
+                }
             }
             _ => (),
         }
@@ -780,6 +930,20 @@ use passes::{
     VignettePassData,
 };
 use wgpu_render_graph::{RenderGraph, ResourceId};
+
+pub struct ViewportRenderTarget {
+    pub tile_id: egui_tiles::TileId,
+    pub color_texture: wgpu::Texture,
+    pub color_view: wgpu::TextureView,
+    pub egui_texture_id: Option<egui::TextureId>,
+}
+
+pub struct ViewportCamera {
+    pub tile_id: egui_tiles::TileId,
+    pub camera_id: usize,
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+}
 
 pub struct Renderer {
     gpu: Gpu,
@@ -806,6 +970,8 @@ pub struct Renderer {
     egui_output_resource_id: ResourceId,
     viewport_texture_id: Option<egui::TextureId>,
     _sharpen_uniform_buffer: Arc<wgpu::Buffer>,
+    viewport_targets: HashMap<egui_tiles::TileId, ViewportRenderTarget>,
+    camera_render_targets: HashMap<usize, (wgpu::Texture, wgpu::TextureView)>,
 }
 
 impl Renderer {
@@ -1229,10 +1395,10 @@ impl Renderer {
             .sample_count(1)
             .mip_levels(1)
             .clear_color(wgpu::Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
+                r: 0.3,
+                g: 0.3,
+                b: 0.3,
+                a: 1.0,
             })
             .transient();
 
@@ -1253,9 +1419,9 @@ impl Renderer {
             .sample_count(1)
             .mip_levels(1)
             .clear_color(wgpu::Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
                 a: 1.0,
             })
             .transient();
@@ -1499,6 +1665,8 @@ impl Renderer {
             egui_output_resource_id,
             viewport_texture_id: None,
             _sharpen_uniform_buffer: sharpen_uniform_buffer,
+            viewport_targets: HashMap::new(),
+            camera_render_targets: HashMap::new(),
         }
     }
 
@@ -1624,6 +1792,51 @@ impl Renderer {
 
     pub fn viewport_texture_id(&self) -> Option<egui::TextureId> {
         self.viewport_texture_id
+    }
+
+    pub fn get_viewport_texture_id(&self, tile_id: egui_tiles::TileId) -> Option<egui::TextureId> {
+        self.viewport_targets
+            .get(&tile_id)
+            .and_then(|target| target.egui_texture_id)
+    }
+
+    fn ensure_viewport_target(&mut self, tile_id: egui_tiles::TileId, width: u32, height: u32) {
+        let needs_create = if let Some(existing) = self.viewport_targets.get(&tile_id) {
+            existing.color_texture.width() != width || existing.color_texture.height() != height
+        } else {
+            true
+        };
+
+        if needs_create {
+            let color_texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Viewport Color Texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.gpu.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+
+            let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let target = ViewportRenderTarget {
+                tile_id,
+                color_texture,
+                color_view,
+                egui_texture_id: None,
+            };
+
+            self.viewport_targets.insert(tile_id, target);
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1773,11 +1986,10 @@ impl Renderer {
         paint_jobs: Vec<egui::epaint::ClippedPrimitive>,
         textures_delta: egui::TexturesDelta,
         delta_time: crate::Duration,
+        viewports: Vec<ViewportCamera>,
+        cameras: &[Camera],
     ) {
         let delta_time = delta_time.as_secs_f32();
-
-        self.scene
-            .update(&self.gpu.queue, self.gpu.aspect_ratio(), delta_time);
 
         if let Some(renderer) = &mut self.pass_configs.egui.renderer {
             for (id, image_delta) in &textures_delta.set {
@@ -1804,6 +2016,175 @@ impl Renderer {
                 &paint_jobs,
                 &screen_descriptor,
             );
+        }
+
+        let camera_render_size = (
+            self.gpu.surface_config.width as f32,
+            self.gpu.surface_config.height as f32,
+        );
+
+        let mut unique_cameras: HashMap<usize, (Camera, f32, f32)> = HashMap::new();
+
+        for camera in cameras {
+            unique_cameras.insert(
+                camera.id,
+                (camera.clone(), camera_render_size.0, camera_render_size.1),
+            );
+        }
+
+        for (camera_id, (_camera, width, height)) in &unique_cameras {
+            let width = width.ceil() as u32;
+            let height = height.ceil() as u32;
+
+            let needs_create =
+                if let Some((existing_texture, _)) = self.camera_render_targets.get(camera_id) {
+                    existing_texture.width() != width || existing_texture.height() != height
+                } else {
+                    true
+                };
+
+            if needs_create {
+                let camera_texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("Camera {} Texture", camera_id)),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.gpu.surface_format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let camera_texture_view =
+                    camera_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+                self.camera_render_targets
+                    .insert(*camera_id, (camera_texture, camera_texture_view));
+            }
+        }
+
+        self.scene.model = nalgebra_glm::rotate(
+            &self.scene.model,
+            30_f32.to_radians() * delta_time,
+            &nalgebra_glm::Vec3::y(),
+        );
+
+        for (camera_id, (camera, width, height)) in unique_cameras {
+            let width = width.ceil() as u32;
+            let height = height.ceil() as u32;
+
+            let (_, camera_texture_view) = self.camera_render_targets.get(&camera_id).unwrap();
+
+            let camera_depth = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("Camera {} Depth", camera_id)),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: Self::DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let camera_depth_view =
+                camera_depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let aspect_ratio = width as f32 / height as f32;
+            self.scene
+                .update_with_camera(&self.gpu.queue, aspect_ratio, 0.0, &camera);
+
+            let dummy_surface = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Dummy Surface for Camera Rendering"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.gpu.surface_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let dummy_surface_view =
+                dummy_surface.create_view(&wgpu::TextureViewDescriptor::default());
+
+            self.render_graph
+                .resources_mut()
+                .set_external_texture(self.depth_resource_id, camera_depth_view);
+            self.render_graph.resources_mut().set_external_texture(
+                self.viewport_display_resource_id,
+                camera_texture_view.clone(),
+            );
+            self.render_graph
+                .resources_mut()
+                .set_external_texture(self.surface_resource_id, dummy_surface_view);
+
+            let saved_paint_jobs = std::mem::take(&mut self.pass_configs.egui.paint_jobs);
+            let saved_screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: self.pass_configs.egui.screen_descriptor.size_in_pixels,
+                pixels_per_point: self.pass_configs.egui.screen_descriptor.pixels_per_point,
+            };
+            self.pass_configs.egui.screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [width, height],
+                pixels_per_point: 1.0,
+            };
+            let camera_command_buffers =
+                self.render_graph
+                    .execute(&self.gpu.device, &self.gpu.queue, &self.pass_configs);
+            self.pass_configs.egui.paint_jobs = saved_paint_jobs;
+            self.pass_configs.egui.screen_descriptor = saved_screen_descriptor;
+            self.gpu.queue.submit(camera_command_buffers);
+        }
+
+        for viewport in &viewports {
+            self.ensure_viewport_target(
+                viewport.tile_id,
+                self.gpu.surface_config.width,
+                self.gpu.surface_config.height,
+            );
+
+            if let Some((camera_texture, _)) = self.camera_render_targets.get(&viewport.camera_id) {
+                let viewport_target = self.viewport_targets.get(&viewport.tile_id).unwrap();
+
+                let mut copy_encoder =
+                    self.gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Copy Camera to Viewport Encoder"),
+                        });
+
+                copy_encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: camera_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &viewport_target.color_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: camera_texture.width(),
+                        height: camera_texture.height(),
+                        depth_or_array_layers: 1,
+                    },
+                );
+
+                self.gpu.queue.submit(Some(copy_encoder.finish()));
+            }
         }
 
         let surface_texture = match self.gpu.surface.get_current_texture() {
@@ -1856,14 +2237,24 @@ impl Renderer {
 
         self.gpu.queue.submit(command_buffers);
 
-        if self.viewport_texture_id.is_none()
-            && let Some(renderer) = &mut self.pass_configs.egui.renderer
-        {
-            self.viewport_texture_id = Some(renderer.register_native_texture(
-                &self.gpu.device,
-                &self.viewport_display_view,
-                wgpu::FilterMode::Linear,
-            ));
+        if let Some(renderer) = &mut self.pass_configs.egui.renderer {
+            for viewport_target in self.viewport_targets.values_mut() {
+                if viewport_target.egui_texture_id.is_none() {
+                    viewport_target.egui_texture_id = Some(renderer.register_native_texture(
+                        &self.gpu.device,
+                        &viewport_target.color_view,
+                        wgpu::FilterMode::Linear,
+                    ));
+                }
+            }
+
+            if self.viewport_texture_id.is_none() {
+                self.viewport_texture_id = Some(renderer.register_native_texture(
+                    &self.gpu.device,
+                    &self.viewport_display_view,
+                    wgpu::FilterMode::Linear,
+                ));
+            }
         }
 
         surface_texture.present();
@@ -2221,19 +2612,31 @@ impl Scene {
         }
     }
 
-    pub fn update(&mut self, queue: &wgpu::Queue, aspect_ratio: f32, delta_time: f32) {
+    pub fn update_with_camera(
+        &mut self,
+        queue: &wgpu::Queue,
+        aspect_ratio: f32,
+        delta_time: f32,
+        camera: &Camera,
+    ) {
         let projection =
-            nalgebra_glm::perspective_lh_zo(aspect_ratio, 80_f32.to_radians(), 0.1, 1000.0);
-        let view = nalgebra_glm::look_at_lh(
-            &nalgebra_glm::vec3(0.0, 0.0, 3.0),
-            &nalgebra_glm::vec3(0.0, 0.0, 0.0),
-            &nalgebra_glm::Vec3::y(),
+            nalgebra_glm::perspective_lh_zo(aspect_ratio, camera.fov.to_radians(), 0.1, 1000.0);
+
+        let forward = nalgebra_glm::vec3(
+            camera.yaw.cos() * camera.pitch.cos(),
+            camera.pitch.sin(),
+            camera.yaw.sin() * camera.pitch.cos(),
         );
+        let target = camera.position + forward;
+
+        let view = nalgebra_glm::look_at_lh(&camera.position, &target, &nalgebra_glm::Vec3::y());
+
         self.model = nalgebra_glm::rotate(
             &self.model,
             30_f32.to_radians() * delta_time,
             &nalgebra_glm::Vec3::y(),
         );
+
         self.uniform.update_buffer(
             queue,
             0,
