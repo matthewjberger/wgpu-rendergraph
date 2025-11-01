@@ -196,8 +196,8 @@ impl PassNode<crate::pass_configs::PassConfigs> for ComputeGrayscalePass {
         compute_pass.set_pipeline(&self.data.pipeline);
         compute_pass.set_bind_group(0, self.cached_bind_group.as_ref().unwrap(), &[]);
 
-        let workgroup_count_x = (texture_size.0 + 7) / 8;
-        let workgroup_count_y = (texture_size.1 + 7) / 8;
+        let workgroup_count_x = texture_size.0.div_ceil(8);
+        let workgroup_count_y = texture_size.1.div_ceil(8);
         compute_pass.dispatch_workgroups(workgroup_count_x, workgroup_count_y, 1);
 
         drop(compute_pass);
