@@ -67,6 +67,7 @@ impl RenderGraphBufferDescriptor {
 pub enum ResourceType {
     ExternalColor {
         clear_color: Option<wgpu::Color>,
+        force_store: bool,
     },
     TransientColor {
         descriptor: RenderGraphTextureDescriptor,
@@ -74,6 +75,7 @@ pub enum ResourceType {
     },
     ExternalDepth {
         clear_depth: Option<f32>,
+        force_store: bool,
     },
     TransientDepth {
         descriptor: RenderGraphTextureDescriptor,
@@ -225,7 +227,7 @@ impl RenderGraphResources {
             .unwrap_or_else(|| panic!("Color attachment {:?} descriptor not found", id));
 
         let load_op = match &descriptor.resource_type {
-            ResourceType::ExternalColor { clear_color }
+            ResourceType::ExternalColor { clear_color, .. }
             | ResourceType::TransientColor { clear_color, .. } => {
                 if let Some(color) = clear_color {
                     wgpu::LoadOp::Clear(*color)
@@ -254,7 +256,7 @@ impl RenderGraphResources {
             .unwrap_or_else(|| panic!("Depth attachment {:?} descriptor not found", id));
 
         let load_op = match &descriptor.resource_type {
-            ResourceType::ExternalDepth { clear_depth }
+            ResourceType::ExternalDepth { clear_depth, .. }
             | ResourceType::TransientDepth { clear_depth, .. } => {
                 if let Some(depth) = clear_depth {
                     wgpu::LoadOp::Clear(*depth)
@@ -504,6 +506,7 @@ pub struct ColorTextureBuilder<'a, C = ()> {
     name: String,
     descriptor: RenderGraphTextureDescriptor,
     clear_color: Option<wgpu::Color>,
+    force_store: bool,
 }
 
 impl<'a, C> ColorTextureBuilder<'a, C> {
@@ -538,11 +541,17 @@ impl<'a, C> ColorTextureBuilder<'a, C> {
         self
     }
 
+    pub fn no_store(mut self) -> Self {
+        self.force_store = false;
+        self
+    }
+
     pub fn external(self) -> ResourceId {
         self.graph.resources.register_external_resource(
             self.name,
             ResourceType::ExternalColor {
                 clear_color: self.clear_color,
+                force_store: self.force_store,
             },
         )
     }
@@ -563,6 +572,7 @@ pub struct DepthTextureBuilder<'a, C = ()> {
     name: String,
     descriptor: RenderGraphTextureDescriptor,
     clear_depth: Option<f32>,
+    force_store: bool,
 }
 
 impl<'a, C> DepthTextureBuilder<'a, C> {
@@ -597,11 +607,17 @@ impl<'a, C> DepthTextureBuilder<'a, C> {
         self
     }
 
+    pub fn no_store(mut self) -> Self {
+        self.force_store = false;
+        self
+    }
+
     pub fn external(self) -> ResourceId {
         self.graph.resources.register_external_resource(
             self.name,
             ResourceType::ExternalDepth {
                 clear_depth: self.clear_depth,
+                force_store: self.force_store,
             },
         )
     }
@@ -778,6 +794,7 @@ impl<C> RenderGraph<C> {
                 mip_level_count: 1,
             },
             clear_color: None,
+            force_store: true,
         }
     }
 
@@ -794,6 +811,7 @@ impl<C> RenderGraph<C> {
                 mip_level_count: 1,
             },
             clear_depth: None,
+            force_store: true,
         }
     }
 
@@ -966,23 +984,41 @@ impl<C> RenderGraph<C> {
                 };
 
                 if can_reuse {
-                    let needs_new_resource = if let (
-                        PoolDescriptorInfo::Buffer(pool_desc),
-                        ResourceType::TransientBuffer {
-                            descriptor: res_desc,
-                        },
-                    ) =
-                        (&mut candidate.descriptor_info, &descriptor.resource_type)
-                    {
-                        if res_desc.size > pool_desc.size {
-                            *pool_desc = res_desc.clone();
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
+                    let needs_new_resource =
+                        match (&mut candidate.descriptor_info, &descriptor.resource_type) {
+                            (
+                                PoolDescriptorInfo::Texture(pool_desc),
+                                ResourceType::TransientColor {
+                                    descriptor: res_desc,
+                                    ..
+                                }
+                                | ResourceType::TransientDepth {
+                                    descriptor: res_desc,
+                                    ..
+                                },
+                            ) => {
+                                if !pool_desc.usage.contains(res_desc.usage) {
+                                    pool_desc.usage = pool_desc.usage | res_desc.usage;
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            (
+                                PoolDescriptorInfo::Buffer(pool_desc),
+                                ResourceType::TransientBuffer {
+                                    descriptor: res_desc,
+                                },
+                            ) => {
+                                if res_desc.size > pool_desc.size {
+                                    *pool_desc = res_desc.clone();
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
 
                     let pool_slot = &mut aliasing_info.pools[candidate.pool_index];
                     pool_slot.lifetime_end = lifetime.last_use;
@@ -1063,7 +1099,24 @@ impl<C> RenderGraph<C> {
                 let descriptor = self.resources.get_descriptor(resource_id).unwrap();
 
                 if descriptor.is_external {
-                    store_ops.insert(resource_id, StoreOp::Store);
+                    let store_op = match &descriptor.resource_type {
+                        ResourceType::ExternalColor { force_store, .. }
+                        | ResourceType::ExternalDepth { force_store, .. } => {
+                            if *force_store {
+                                StoreOp::Store
+                            } else if last_read
+                                .get(&resource_id)
+                                .is_some_and(|&last| last > index)
+                            {
+                                StoreOp::Store
+                            } else {
+                                StoreOp::Discard
+                            }
+                        }
+                        ResourceType::ExternalBuffer => StoreOp::Store,
+                        _ => StoreOp::Store,
+                    };
+                    store_ops.insert(resource_id, store_op);
                     continue;
                 }
 
@@ -1083,7 +1136,17 @@ impl<C> RenderGraph<C> {
             store_ops.entry(resource_id).or_insert_with(|| {
                 let descriptor = self.resources.get_descriptor(resource_id).unwrap();
                 if descriptor.is_external {
-                    StoreOp::Store
+                    match &descriptor.resource_type {
+                        ResourceType::ExternalColor { force_store, .. }
+                        | ResourceType::ExternalDepth { force_store, .. } => {
+                            if *force_store {
+                                StoreOp::Store
+                            } else {
+                                StoreOp::Discard
+                            }
+                        }
+                        _ => StoreOp::Store,
+                    }
                 } else {
                     StoreOp::Discard
                 }
@@ -1315,9 +1378,23 @@ impl<C> RenderGraph<C> {
                                         })
                                         .map(|(id, _)| *id)
                                     {
-                                        sub_graph
+                                        let descriptor = sub_graph
                                             .resources
-                                            .set_external_texture(resource_id, (*view).clone());
+                                            .get_descriptor(resource_id)
+                                            .unwrap();
+                                        match &descriptor.resource_type {
+                                            ResourceType::ExternalColor { .. }
+                                            | ResourceType::ExternalDepth { .. } => {
+                                                sub_graph.resources.set_external_texture(
+                                                    resource_id,
+                                                    (*view).clone(),
+                                                );
+                                            }
+                                            _ => panic!(
+                                                "Sub-graph input '{}' expects buffer but received texture",
+                                                input_slot.name
+                                            ),
+                                        }
                                     }
                                 }
                                 SlotValue::Buffer(buffer) => {
@@ -1330,9 +1407,22 @@ impl<C> RenderGraph<C> {
                                         })
                                         .map(|(id, _)| *id)
                                     {
-                                        sub_graph
+                                        let descriptor = sub_graph
                                             .resources
-                                            .set_external_buffer(resource_id, (*buffer).clone());
+                                            .get_descriptor(resource_id)
+                                            .unwrap();
+                                        match &descriptor.resource_type {
+                                            ResourceType::ExternalBuffer => {
+                                                sub_graph.resources.set_external_buffer(
+                                                    resource_id,
+                                                    (*buffer).clone(),
+                                                );
+                                            }
+                                            _ => panic!(
+                                                "Sub-graph input '{}' expects texture but received buffer",
+                                                input_slot.name
+                                            ),
+                                        }
                                     }
                                 }
                             }
