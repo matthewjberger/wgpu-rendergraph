@@ -7,6 +7,55 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
+#[derive(Debug, thiserror::Error)]
+pub enum RenderGraphError {
+    #[error("Slot '{slot}' not found in pass '{pass}' resource mappings")]
+    SlotNotFound { slot: String, pass: String },
+
+    #[error("Resource '{resource}' (id: {id:?}) not bound")]
+    ResourceNotBound { resource: String, id: ResourceId },
+
+    #[error("Resource '{resource}' descriptor not found (id: {id:?})")]
+    DescriptorNotFound { resource: String, id: ResourceId },
+
+    #[error("Type mismatch: {operation} called on {actual_type} resource '{resource}'")]
+    TypeMismatch {
+        operation: String,
+        actual_type: String,
+        resource: String,
+    },
+
+    #[error("Pass '{pass}': slot '{slot}' not provided in mappings")]
+    SlotNotMapped { pass: String, slot: String },
+
+    #[error("Cannot resize external resource '{resource}'")]
+    CannotResizeExternal { resource: String },
+
+    #[error("Cannot resize buffer '{resource}' with width/height")]
+    CannotResizeBuffer { resource: String },
+
+    #[error("Cannot resize non-transient resource '{resource}'")]
+    CannotResizeNonTransient { resource: String },
+
+    #[error("Render graph contains cycles")]
+    CyclicDependency,
+
+    #[error("Sub-graph '{sub_graph}' not found")]
+    SubGraphNotFound { sub_graph: String },
+
+    #[error("Sub-graph input '{input}' expects {expected} but received {received}")]
+    SubGraphInputTypeMismatch {
+        input: String,
+        expected: String,
+        received: String,
+    },
+
+    #[error("Resource '{resource}' (id: {id:?}) not found")]
+    ResourceNotFound { resource: String, id: ResourceId },
+}
+
+pub type Result<T> = std::result::Result<T, RenderGraphError>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceId(pub u32);
 
@@ -218,13 +267,19 @@ impl RenderGraphResources {
     pub fn get_color_attachment(
         &self,
         id: ResourceId,
-    ) -> (&TextureView, wgpu::LoadOp<wgpu::Color>, StoreOp) {
+    ) -> Result<(&TextureView, wgpu::LoadOp<wgpu::Color>, StoreOp)> {
         let handle = self
             .get_handle(id)
-            .unwrap_or_else(|| panic!("Color attachment {:?} not bound", id));
-        let descriptor = self
-            .get_descriptor(id)
-            .unwrap_or_else(|| panic!("Color attachment {:?} descriptor not found", id));
+            .ok_or_else(|| RenderGraphError::ResourceNotBound {
+                resource: format!("color_attachment_{:?}", id),
+                id,
+            })?;
+        let descriptor =
+            self.get_descriptor(id)
+                .ok_or_else(|| RenderGraphError::DescriptorNotFound {
+                    resource: format!("color_attachment_{:?}", id),
+                    id,
+                })?;
 
         let load_op = match &descriptor.resource_type {
             ResourceType::ExternalColor { clear_color, .. }
@@ -235,25 +290,41 @@ impl RenderGraphResources {
                     wgpu::LoadOp::Load
                 }
             }
-            _ => panic!(
-                "get_color_attachment called on non-color texture resource '{}'",
-                descriptor.name
-            ),
+            _ => {
+                return Err(RenderGraphError::TypeMismatch {
+                    operation: "get_color_attachment".to_string(),
+                    actual_type: match &descriptor.resource_type {
+                        ResourceType::ExternalDepth { .. }
+                        | ResourceType::TransientDepth { .. } => "depth".to_string(),
+                        ResourceType::ExternalBuffer | ResourceType::TransientBuffer { .. } => {
+                            "buffer".to_string()
+                        }
+                        _ => "unknown".to_string(),
+                    },
+                    resource: descriptor.name.clone(),
+                });
+            }
         };
 
-        (handle.view(), load_op, handle.store_op())
+        Ok((handle.view(), load_op, handle.store_op()))
     }
 
     pub fn get_depth_attachment(
         &self,
         id: ResourceId,
-    ) -> (&TextureView, wgpu::LoadOp<f32>, StoreOp) {
+    ) -> Result<(&TextureView, wgpu::LoadOp<f32>, StoreOp)> {
         let handle = self
             .get_handle(id)
-            .unwrap_or_else(|| panic!("Depth attachment {:?} not bound", id));
-        let descriptor = self
-            .get_descriptor(id)
-            .unwrap_or_else(|| panic!("Depth attachment {:?} descriptor not found", id));
+            .ok_or_else(|| RenderGraphError::ResourceNotBound {
+                resource: format!("depth_attachment_{:?}", id),
+                id,
+            })?;
+        let descriptor =
+            self.get_descriptor(id)
+                .ok_or_else(|| RenderGraphError::DescriptorNotFound {
+                    resource: format!("depth_attachment_{:?}", id),
+                    id,
+                })?;
 
         let load_op = match &descriptor.resource_type {
             ResourceType::ExternalDepth { clear_depth, .. }
@@ -264,26 +335,46 @@ impl RenderGraphResources {
                     wgpu::LoadOp::Load
                 }
             }
-            _ => panic!(
-                "get_depth_attachment called on non-depth texture resource '{}'",
-                descriptor.name
-            ),
+            _ => {
+                return Err(RenderGraphError::TypeMismatch {
+                    operation: "get_depth_attachment".to_string(),
+                    actual_type: match &descriptor.resource_type {
+                        ResourceType::ExternalColor { .. }
+                        | ResourceType::TransientColor { .. } => "color".to_string(),
+                        ResourceType::ExternalBuffer | ResourceType::TransientBuffer { .. } => {
+                            "buffer".to_string()
+                        }
+                        _ => "unknown".to_string(),
+                    },
+                    resource: descriptor.name.clone(),
+                });
+            }
         };
 
-        (handle.view(), load_op, handle.store_op())
+        Ok((handle.view(), load_op, handle.store_op()))
     }
 
     pub fn get_texture_view(&self, id: ResourceId) -> Option<&TextureView> {
         self.get_handle(id).map(|handle| handle.view())
     }
 
-    pub fn update_transient_descriptor(&mut self, id: ResourceId, width: u32, height: u32) {
-        let descriptor = self.get_descriptor(id).unwrap_or_else(|| {
-            panic!("Resource {:?} not found", id);
-        });
+    pub fn update_transient_descriptor(
+        &mut self,
+        id: ResourceId,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let descriptor =
+            self.get_descriptor(id)
+                .ok_or_else(|| RenderGraphError::ResourceNotFound {
+                    resource: format!("resource_{:?}", id),
+                    id,
+                })?;
 
         if descriptor.is_external {
-            panic!("Cannot resize external resource '{}'", descriptor.name);
+            return Err(RenderGraphError::CannotResizeExternal {
+                resource: descriptor.name.clone(),
+            });
         }
 
         let name = descriptor.name.clone();
@@ -312,9 +403,15 @@ impl RenderGraphResources {
                 clear_depth: *clear_depth,
             },
             ResourceType::TransientBuffer { .. } => {
-                panic!("Cannot resize buffer '{}' with width/height", name)
+                return Err(RenderGraphError::CannotResizeBuffer {
+                    resource: name.clone(),
+                });
             }
-            _ => panic!("Cannot resize non-transient resource '{}'", name),
+            _ => {
+                return Err(RenderGraphError::CannotResizeNonTransient {
+                    resource: name.clone(),
+                });
+            }
         };
 
         self.descriptors.insert(
@@ -325,6 +422,8 @@ impl RenderGraphResources {
                 is_external: false,
             },
         );
+
+        Ok(())
     }
 
     pub fn allocate_transient_resources_with_aliasing(
@@ -422,37 +521,43 @@ pub struct PassExecutionContext<'r, 'e, C = ()> {
 }
 
 impl<'r, 'e, C> PassExecutionContext<'r, 'e, C> {
-    pub fn get_slot(&self, slot: &str) -> ResourceId {
-        *self
-            .slot_mappings
+    pub fn get_slot(&self, slot: &str) -> Result<ResourceId> {
+        self.slot_mappings
             .get(slot)
-            .unwrap_or_else(|| panic!("Slot '{}' not found in pass resource mappings", slot))
+            .copied()
+            .ok_or_else(|| RenderGraphError::SlotNotFound {
+                slot: slot.to_string(),
+                pass: "unknown".to_string(),
+            })
     }
 
-    pub fn get_texture_view(&self, slot: &str) -> &'r wgpu::TextureView {
-        let resource_id = self.get_slot(slot);
-        self.resources
-            .get_texture_view(resource_id)
-            .unwrap_or_else(|| panic!("Texture view for slot '{}' not allocated", slot))
+    pub fn get_texture_view(&self, slot: &str) -> Result<&'r wgpu::TextureView> {
+        let resource_id = self.get_slot(slot)?;
+        self.resources.get_texture_view(resource_id).ok_or_else(|| {
+            RenderGraphError::ResourceNotBound {
+                resource: slot.to_string(),
+                id: resource_id,
+            }
+        })
     }
 
     pub fn get_color_attachment(
         &self,
         slot: &str,
-    ) -> (
+    ) -> Result<(
         &'r wgpu::TextureView,
         wgpu::LoadOp<wgpu::Color>,
         wgpu::StoreOp,
-    ) {
-        let resource_id = self.get_slot(slot);
+    )> {
+        let resource_id = self.get_slot(slot)?;
         self.resources.get_color_attachment(resource_id)
     }
 
     pub fn get_depth_attachment(
         &self,
         slot: &str,
-    ) -> (&'r wgpu::TextureView, wgpu::LoadOp<f32>, wgpu::StoreOp) {
-        let resource_id = self.get_slot(slot);
+    ) -> Result<(&'r wgpu::TextureView, wgpu::LoadOp<f32>, wgpu::StoreOp)> {
+        let resource_id = self.get_slot(slot)?;
         self.resources.get_depth_attachment(resource_id)
     }
 
@@ -480,7 +585,7 @@ pub trait PassNode<C = ()>: Send + Sync {
     fn execute<'r, 'e>(
         &mut self,
         context: PassExecutionContext<'r, 'e, C>,
-    ) -> Vec<SubGraphRunCommand<'r>>;
+    ) -> Result<Vec<SubGraphRunCommand<'r>>>;
 }
 
 pub struct GraphNode<C> {
@@ -710,7 +815,7 @@ impl<C> RenderGraph<C> {
         &mut self,
         pass: Box<dyn PassNode<C>>,
         slot_mappings: &[(&str, ResourceId)],
-    ) -> NodeIndex {
+    ) -> Result<NodeIndex> {
         let name = pass.name().to_string();
         let slot_names_reads = pass.reads();
         let slot_names_writes = pass.writes();
@@ -724,29 +829,41 @@ impl<C> RenderGraph<C> {
         let reads: Vec<ResourceId> = slot_names_reads
             .iter()
             .map(|slot| {
-                *mappings.get(*slot).unwrap_or_else(|| {
-                    panic!("Pass '{}': slot '{}' not provided in mappings", name, slot)
-                })
+                mappings
+                    .get(*slot)
+                    .copied()
+                    .ok_or_else(|| RenderGraphError::SlotNotMapped {
+                        pass: name.clone(),
+                        slot: slot.to_string(),
+                    })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let writes: Vec<ResourceId> = slot_names_writes
             .iter()
             .map(|slot| {
-                *mappings.get(*slot).unwrap_or_else(|| {
-                    panic!("Pass '{}': slot '{}' not provided in mappings", name, slot)
-                })
+                mappings
+                    .get(*slot)
+                    .copied()
+                    .ok_or_else(|| RenderGraphError::SlotNotMapped {
+                        pass: name.clone(),
+                        slot: slot.to_string(),
+                    })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let reads_writes: Vec<ResourceId> = slot_names_reads_writes
             .iter()
             .map(|slot| {
-                *mappings.get(*slot).unwrap_or_else(|| {
-                    panic!("Pass '{}': slot '{}' not provided in mappings", name, slot)
-                })
+                mappings
+                    .get(*slot)
+                    .copied()
+                    .ok_or_else(|| RenderGraphError::SlotNotMapped {
+                        pass: name.clone(),
+                        slot: slot.to_string(),
+                    })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let graph_node = GraphNode {
             name: name.clone(),
@@ -760,7 +877,7 @@ impl<C> RenderGraph<C> {
         self.pass_nodes.insert(name.clone(), index);
         self.pass_resource_mappings.insert(name, mappings);
         self.needs_recompile = true;
-        index
+        Ok(index)
     }
 
     pub fn add_sub_graph(
@@ -1190,11 +1307,11 @@ impl<C> RenderGraph<C> {
         all_passes.difference(&required_passes).copied().collect()
     }
 
-    pub fn compile(&mut self) -> Result<(), String> {
+    pub fn compile(&mut self) -> Result<()> {
         self.build_dependency_edges();
 
         self.execution_order = petgraph::algo::toposort(&self.graph, None)
-            .map_err(|_| "Render graph contains cycles")?;
+            .map_err(|_| RenderGraphError::CyclicDependency)?;
 
         self.store_ops = self.compute_store_ops(&self.execution_order);
 
@@ -1207,16 +1324,16 @@ impl<C> RenderGraph<C> {
         Ok(())
     }
 
-    fn recompile_if_needed(&mut self) {
+    fn recompile_if_needed(&mut self) -> Result<()> {
         if self.needs_resource_reallocation {
             let lifetimes = self.compute_resource_lifetimes(&self.execution_order);
             self.aliasing_info = Some(self.compute_resource_aliasing(lifetimes));
             self.needs_resource_reallocation = false;
-            return;
+            return Ok(());
         }
 
         if !self.needs_recompile {
-            return;
+            return Ok(());
         }
 
         let edge_indices: Vec<_> = self.graph.edge_indices().collect();
@@ -1226,8 +1343,8 @@ impl<C> RenderGraph<C> {
 
         self.build_dependency_edges();
 
-        self.execution_order =
-            petgraph::algo::toposort(&self.graph, None).expect("Render graph contains cycles");
+        self.execution_order = petgraph::algo::toposort(&self.graph, None)
+            .map_err(|_| RenderGraphError::CyclicDependency)?;
 
         self.store_ops = self.compute_store_ops(&self.execution_order);
 
@@ -1237,6 +1354,7 @@ impl<C> RenderGraph<C> {
         self.culled_passes = self.compute_dead_passes(&self.execution_order);
 
         self.needs_recompile = false;
+        Ok(())
     }
 
     pub fn execute(
@@ -1244,8 +1362,8 @@ impl<C> RenderGraph<C> {
         device: &Device,
         queue: &wgpu::Queue,
         configs: &C,
-    ) -> Vec<CommandBuffer> {
-        self.recompile_if_needed();
+    ) -> Result<Vec<CommandBuffer>> {
+        self.recompile_if_needed()?;
 
         if self.aliasing_info.is_none() {
             let lifetimes = self.compute_resource_lifetimes(&self.execution_order);
@@ -1324,7 +1442,7 @@ impl<C> RenderGraph<C> {
         device: &Device,
         queue: &wgpu::Queue,
         configs: &C,
-    ) -> Vec<CommandBuffer> {
+    ) -> Result<Vec<CommandBuffer>> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("RenderGraph Serial Encoder"),
         });
@@ -1337,10 +1455,12 @@ impl<C> RenderGraph<C> {
             }
 
             let node = &mut self.graph[node_index];
-            let slot_mappings = self
-                .pass_resource_mappings
-                .get(&node.name)
-                .expect("Pass resource mappings not found");
+            let slot_mappings = self.pass_resource_mappings.get(&node.name).ok_or_else(|| {
+                RenderGraphError::ResourceNotFound {
+                    resource: format!("pass_{}_mappings", node.name),
+                    id: ResourceId(0),
+                }
+            })?;
 
             let sub_graph_commands = {
                 let context = PassExecutionContext {
@@ -1352,86 +1472,106 @@ impl<C> RenderGraph<C> {
                     sub_graph_commands: Vec::new(),
                 };
 
-                node.pass.execute(context)
+                node.pass.execute(context)?
             };
 
             for command in sub_graph_commands {
                 command_buffers.push(encoder.finish());
 
-                if let Some(sub_graph) = self.sub_graphs.get_mut(&command.sub_graph_name) {
-                    let input_slots = self
-                        .sub_graph_inputs
-                        .get(&command.sub_graph_name)
-                        .cloned()
-                        .unwrap_or_default();
+                let sub_graph = self
+                    .sub_graphs
+                    .get_mut(&command.sub_graph_name)
+                    .ok_or_else(|| RenderGraphError::SubGraphNotFound {
+                        sub_graph: command.sub_graph_name.clone(),
+                    })?;
 
-                    for (index, slot_value) in command.inputs.iter().enumerate() {
-                        if let Some(input_slot) = input_slots.get(index) {
-                            match slot_value {
-                                SlotValue::TextureView(view) => {
-                                    if let Some(resource_id) = sub_graph
+                let input_slots = self
+                    .sub_graph_inputs
+                    .get(&command.sub_graph_name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                for (index, slot_value) in command.inputs.iter().enumerate() {
+                    if let Some(input_slot) = input_slots.get(index) {
+                        match slot_value {
+                            SlotValue::TextureView(view) => {
+                                if let Some(resource_id) = sub_graph
+                                    .resources
+                                    .descriptors
+                                    .iter()
+                                    .find(|(_, desc)| {
+                                        desc.name == input_slot.name && desc.is_external
+                                    })
+                                    .map(|(id, _)| *id)
+                                {
+                                    let descriptor = sub_graph
                                         .resources
-                                        .descriptors
-                                        .iter()
-                                        .find(|(_, desc)| {
-                                            desc.name == input_slot.name && desc.is_external
-                                        })
-                                        .map(|(id, _)| *id)
-                                    {
-                                        let descriptor = sub_graph
-                                            .resources
-                                            .get_descriptor(resource_id)
-                                            .unwrap();
-                                        match &descriptor.resource_type {
-                                            ResourceType::ExternalColor { .. }
-                                            | ResourceType::ExternalDepth { .. } => {
-                                                sub_graph.resources.set_external_texture(
-                                                    resource_id,
-                                                    (*view).clone(),
-                                                );
-                                            }
-                                            _ => panic!(
-                                                "Sub-graph input '{}' expects buffer but received texture",
-                                                input_slot.name
-                                            ),
+                                        .get_descriptor(resource_id)
+                                        .ok_or_else(|| RenderGraphError::DescriptorNotFound {
+                                            resource: input_slot.name.clone(),
+                                            id: resource_id,
+                                        })?;
+                                    match &descriptor.resource_type {
+                                        ResourceType::ExternalColor { .. }
+                                        | ResourceType::ExternalDepth { .. } => {
+                                            sub_graph
+                                                .resources
+                                                .set_external_texture(resource_id, (*view).clone());
+                                        }
+                                        _ => {
+                                            return Err(
+                                                RenderGraphError::SubGraphInputTypeMismatch {
+                                                    input: input_slot.name.clone(),
+                                                    expected: "buffer".to_string(),
+                                                    received: "texture".to_string(),
+                                                },
+                                            );
                                         }
                                     }
                                 }
-                                SlotValue::Buffer(buffer) => {
-                                    if let Some(resource_id) = sub_graph
+                            }
+                            SlotValue::Buffer(buffer) => {
+                                if let Some(resource_id) = sub_graph
+                                    .resources
+                                    .descriptors
+                                    .iter()
+                                    .find(|(_, desc)| {
+                                        desc.name == input_slot.name && desc.is_external
+                                    })
+                                    .map(|(id, _)| *id)
+                                {
+                                    let descriptor = sub_graph
                                         .resources
-                                        .descriptors
-                                        .iter()
-                                        .find(|(_, desc)| {
-                                            desc.name == input_slot.name && desc.is_external
-                                        })
-                                        .map(|(id, _)| *id)
-                                    {
-                                        let descriptor = sub_graph
-                                            .resources
-                                            .get_descriptor(resource_id)
-                                            .unwrap();
-                                        match &descriptor.resource_type {
-                                            ResourceType::ExternalBuffer => {
-                                                sub_graph.resources.set_external_buffer(
-                                                    resource_id,
-                                                    (*buffer).clone(),
-                                                );
-                                            }
-                                            _ => panic!(
-                                                "Sub-graph input '{}' expects texture but received buffer",
-                                                input_slot.name
-                                            ),
+                                        .get_descriptor(resource_id)
+                                        .ok_or_else(|| RenderGraphError::DescriptorNotFound {
+                                            resource: input_slot.name.clone(),
+                                            id: resource_id,
+                                        })?;
+                                    match &descriptor.resource_type {
+                                        ResourceType::ExternalBuffer => {
+                                            sub_graph.resources.set_external_buffer(
+                                                resource_id,
+                                                (*buffer).clone(),
+                                            );
+                                        }
+                                        _ => {
+                                            return Err(
+                                                RenderGraphError::SubGraphInputTypeMismatch {
+                                                    input: input_slot.name.clone(),
+                                                    expected: "texture".to_string(),
+                                                    received: "buffer".to_string(),
+                                                },
+                                            );
                                         }
                                     }
                                 }
                             }
                         }
                     }
-
-                    let sub_graph_buffers = sub_graph.execute(device, queue, configs);
-                    command_buffers.extend(sub_graph_buffers);
                 }
+
+                let sub_graph_buffers = sub_graph.execute(device, queue, configs)?;
+                command_buffers.extend(sub_graph_buffers);
 
                 encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("RenderGraph Serial Encoder"),
@@ -1440,7 +1580,7 @@ impl<C> RenderGraph<C> {
         }
 
         command_buffers.push(encoder.finish());
-        command_buffers
+        Ok(command_buffers)
     }
 
     pub fn resources_mut(&mut self) -> &mut RenderGraphResources {
@@ -1453,9 +1593,9 @@ impl<C> RenderGraph<C> {
         id: ResourceId,
         width: u32,
         height: u32,
-    ) {
+    ) -> Result<()> {
         self.resources
-            .update_transient_descriptor(id, width, height);
+            .update_transient_descriptor(id, width, height)?;
 
         self.aliasing_info = None;
         self.resources.handles.retain(|id, _| {
@@ -1466,6 +1606,7 @@ impl<C> RenderGraph<C> {
             }
         });
         self.needs_resource_reallocation = true;
+        Ok(())
     }
 }
 

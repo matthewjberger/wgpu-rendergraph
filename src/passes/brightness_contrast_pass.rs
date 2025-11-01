@@ -190,11 +190,11 @@ impl PassNode<PassConfigs> for BrightnessContrastPass {
     fn execute<'r, 'e>(
         &mut self,
         context: PassExecutionContext<'r, 'e, PassConfigs>,
-    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
+    ) -> wgpu_render_graph::Result<Vec<wgpu_render_graph::SubGraphRunCommand<'r>>> {
         let config = &context.configs.brightness_contrast;
 
         if self.cached_bind_group_with_uniforms.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_with_uniforms = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -219,7 +219,7 @@ impl PassNode<PassConfigs> for BrightnessContrastPass {
         }
 
         if self.cached_bind_group_without_uniforms.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_without_uniforms = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -239,7 +239,7 @@ impl PassNode<PassConfigs> for BrightnessContrastPass {
             ));
         }
 
-        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output")?;
 
         let mut render_pass = context
             .encoder
@@ -280,6 +280,6 @@ impl PassNode<PassConfigs> for BrightnessContrastPass {
 
         drop(render_pass);
 
-        context.into_sub_graph_commands()
+        Ok(context.into_sub_graph_commands())
     }
 }

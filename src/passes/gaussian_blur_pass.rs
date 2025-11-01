@@ -196,9 +196,9 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurHorizontalPass {
     fn execute<'r, 'e>(
         &mut self,
         context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
-    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
+    ) -> wgpu_render_graph::Result<Vec<wgpu_render_graph::SubGraphRunCommand<'r>>> {
         if self.cached_bind_group_with_blur.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_with_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -223,7 +223,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurHorizontalPass {
         }
 
         if self.cached_bind_group_without_blur.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_without_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -244,7 +244,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurHorizontalPass {
         }
 
         let config = &context.configs.gaussian_blur;
-        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output")?;
 
         let mut render_pass = context
             .encoder
@@ -285,7 +285,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurHorizontalPass {
 
         drop(render_pass);
 
-        context.into_sub_graph_commands()
+        Ok(context.into_sub_graph_commands())
     }
 }
 
@@ -338,9 +338,9 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurVerticalPass {
     fn execute<'r, 'e>(
         &mut self,
         context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
-    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
+    ) -> wgpu_render_graph::Result<Vec<wgpu_render_graph::SubGraphRunCommand<'r>>> {
         if self.cached_bind_group_with_blur.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_with_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -365,7 +365,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurVerticalPass {
         }
 
         if self.cached_bind_group_without_blur.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_without_blur = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -386,7 +386,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurVerticalPass {
         }
 
         let config = &context.configs.gaussian_blur;
-        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output")?;
 
         let mut render_pass = context
             .encoder
@@ -426,6 +426,6 @@ impl PassNode<crate::pass_configs::PassConfigs> for GaussianBlurVerticalPass {
         render_pass.draw(0..3, 0..1);
         drop(render_pass);
 
-        context.into_sub_graph_commands()
+        Ok(context.into_sub_graph_commands())
     }
 }

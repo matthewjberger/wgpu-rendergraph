@@ -161,9 +161,9 @@ impl PassNode<crate::pass_configs::PassConfigs> for PostProcessPass {
     fn execute<'r, 'e>(
         &mut self,
         context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
-    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
+    ) -> wgpu_render_graph::Result<Vec<wgpu_render_graph::SubGraphRunCommand<'r>>> {
         if self.cached_bind_group.is_none() {
-            let hdr_texture_view = context.get_texture_view("hdr_input");
+            let hdr_texture_view = context.get_texture_view("hdr_input")?;
 
             self.cached_bind_group = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -184,7 +184,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for PostProcessPass {
         }
 
         let (color_view, color_load_op, color_store_op) =
-            context.get_color_attachment("color_output");
+            context.get_color_attachment("color_output")?;
 
         let mut render_pass = context
             .encoder
@@ -208,6 +208,6 @@ impl PassNode<crate::pass_configs::PassConfigs> for PostProcessPass {
         render_pass.draw(0..3, 0..1);
         drop(render_pass);
 
-        context.into_sub_graph_commands()
+        Ok(context.into_sub_graph_commands())
     }
 }

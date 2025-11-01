@@ -146,9 +146,9 @@ impl PassNode<crate::pass_configs::PassConfigs> for ColorInvertPass {
     fn execute<'r, 'e>(
         &mut self,
         context: PassExecutionContext<'r, 'e, crate::pass_configs::PassConfigs>,
-    ) -> Vec<wgpu_render_graph::SubGraphRunCommand<'r>> {
+    ) -> wgpu_render_graph::Result<Vec<wgpu_render_graph::SubGraphRunCommand<'r>>> {
         if self.cached_bind_group_with_invert.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_with_invert = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -169,7 +169,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for ColorInvertPass {
         }
 
         if self.cached_bind_group_without_invert.is_none() {
-            let input_view = context.get_texture_view("input");
+            let input_view = context.get_texture_view("input")?;
 
             self.cached_bind_group_without_invert = Some(context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
@@ -190,7 +190,7 @@ impl PassNode<crate::pass_configs::PassConfigs> for ColorInvertPass {
         }
 
         let config = &context.configs.color_invert;
-        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output");
+        let (color_view, color_load_op, color_store_op) = context.get_color_attachment("output")?;
 
         let mut render_pass = context
             .encoder
@@ -230,6 +230,6 @@ impl PassNode<crate::pass_configs::PassConfigs> for ColorInvertPass {
         render_pass.draw(0..3, 0..1);
         drop(render_pass);
 
-        context.into_sub_graph_commands()
+        Ok(context.into_sub_graph_commands())
     }
 }

@@ -3611,6 +3611,7 @@ name = "wgpu-render-graph"
 version = "0.1.0"
 dependencies = [
  "petgraph",
+ "thiserror 2.0.17",
  "wgpu",
 ]
 
