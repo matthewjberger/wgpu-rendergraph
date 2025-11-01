@@ -73,6 +73,8 @@ pub struct RenderGraphTextureDescriptor {
     pub usage: TextureUsages,
     pub sample_count: u32,
     pub mip_level_count: u32,
+    pub dimension: wgpu::TextureDimension,
+    pub depth_or_array_layers: u32,
 }
 
 impl RenderGraphTextureDescriptor {
@@ -82,11 +84,11 @@ impl RenderGraphTextureDescriptor {
             size: Extent3d {
                 width: self.width,
                 height: self.height,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: self.depth_or_array_layers,
             },
             mip_level_count: self.mip_level_count,
             sample_count: self.sample_count,
-            dimension: wgpu::TextureDimension::D2,
+            dimension: self.dimension,
             format: self.format,
             usage: self.usage,
             view_formats: &[],
@@ -645,6 +647,9 @@ pub trait PassNode<C = ()>: Send + Sync {
     fn reads_writes(&self) -> Vec<&str> {
         Vec::new()
     }
+    fn is_enabled(&self, _configs: &C) -> bool {
+        true
+    }
     fn prepare(&mut self, _device: &Device, _queue: &wgpu::Queue, _configs: &C) {}
     fn invalidate_bind_groups(&mut self) {}
     fn execute<'r, 'e>(
@@ -841,6 +846,118 @@ impl<'a, C> BufferBuilder<'a, C> {
     }
 }
 
+#[derive(Clone)]
+pub struct ResourceTemplate {
+    format: TextureFormat,
+    width: u32,
+    height: u32,
+    usage: TextureUsages,
+    sample_count: u32,
+    mip_level_count: u32,
+    dimension: wgpu::TextureDimension,
+    depth_or_array_layers: u32,
+}
+
+impl ResourceTemplate {
+    pub fn new(format: TextureFormat, width: u32, height: u32) -> Self {
+        Self {
+            format,
+            width,
+            height,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            sample_count: 1,
+            mip_level_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            depth_or_array_layers: 1,
+        }
+    }
+
+    pub fn usage(mut self, usage: TextureUsages) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    pub fn sample_count(mut self, count: u32) -> Self {
+        self.sample_count = count;
+        self
+    }
+
+    pub fn mip_levels(mut self, levels: u32) -> Self {
+        self.mip_level_count = levels;
+        self
+    }
+
+    pub fn cube_map(mut self) -> Self {
+        self.dimension = wgpu::TextureDimension::D2;
+        self.depth_or_array_layers = 6;
+        self
+    }
+
+    pub fn array_layers(mut self, layers: u32) -> Self {
+        self.depth_or_array_layers = layers;
+        self
+    }
+
+    pub fn dimension_3d(mut self, depth: u32) -> Self {
+        self.dimension = wgpu::TextureDimension::D3;
+        self.depth_or_array_layers = depth;
+        self
+    }
+}
+
+pub struct PassBuilder<'a, C = ()> {
+    graph: &'a mut RenderGraph<C>,
+    pass: Option<Box<dyn PassNode<C>>>,
+    slots: Vec<(&'static str, ResourceId)>,
+}
+
+impl<'a, C> PassBuilder<'a, C> {
+    pub fn read(mut self, slot: &'static str, resource: ResourceId) -> Self {
+        self.slots.push((slot, resource));
+        self
+    }
+
+    pub fn write(mut self, slot: &'static str, resource: ResourceId) -> Self {
+        self.slots.push((slot, resource));
+        self
+    }
+
+    pub fn slot(mut self, slot: &'static str, resource: ResourceId) -> Self {
+        self.slots.push((slot, resource));
+        self
+    }
+}
+
+impl<'a, C> Drop for PassBuilder<'a, C> {
+    fn drop(&mut self) {
+        if let Some(pass) = self.pass.take() {
+            let result = self.graph.add_pass(pass, &self.slots);
+            if let Err(e) = result {
+                panic!("Failed to add render pass: {}", e);
+            }
+        }
+    }
+}
+
+pub struct ResourcePool<'a, C = ()> {
+    graph: &'a mut RenderGraph<C>,
+    template: ResourceTemplate,
+}
+
+impl<'a, C> ResourcePool<'a, C> {
+    pub fn transient(&mut self, name: &str) -> ResourceId {
+        self.graph.transient_color_from_template(name, &self.template)
+    }
+
+    pub fn transient_many(&mut self, names: &[&str]) -> Vec<ResourceId> {
+        names.iter().map(|name| self.transient(name)).collect()
+    }
+
+    pub fn external(&mut self, name: &str) -> ResourceId {
+        self.graph.external_color_from_template(name, &self.template)
+    }
+}
+
 pub struct RenderGraph<C = ()> {
     graph: DiGraph<GraphNode<C>, ResourceId>,
     pass_nodes: HashMap<String, NodeIndex>,
@@ -974,6 +1091,8 @@ impl<C> RenderGraph<C> {
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                 sample_count: 1,
                 mip_level_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                depth_or_array_layers: 1,
             },
             clear_color: None,
             force_store: true,
@@ -991,6 +1110,8 @@ impl<C> RenderGraph<C> {
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                 sample_count: 1,
                 mip_level_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                depth_or_array_layers: 1,
             },
             clear_depth: None,
             force_store: true,
@@ -1006,6 +1127,90 @@ impl<C> RenderGraph<C> {
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             },
+        }
+    }
+
+    pub fn transient_color_from_template(
+        &mut self,
+        name: &str,
+        template: &ResourceTemplate,
+    ) -> ResourceId {
+        self.resources.register_transient_resource(
+            name.to_string(),
+            ResourceType::TransientColor {
+                descriptor: RenderGraphTextureDescriptor {
+                    format: template.format,
+                    width: template.width,
+                    height: template.height,
+                    usage: template.usage,
+                    sample_count: template.sample_count,
+                    mip_level_count: template.mip_level_count,
+                    dimension: template.dimension,
+                    depth_or_array_layers: template.depth_or_array_layers,
+                },
+                clear_color: None,
+            },
+        )
+    }
+
+    pub fn transient_color_from_template_with_clear(
+        &mut self,
+        name: &str,
+        template: &ResourceTemplate,
+        clear_color: wgpu::Color,
+    ) -> ResourceId {
+        self.resources.register_transient_resource(
+            name.to_string(),
+            ResourceType::TransientColor {
+                descriptor: RenderGraphTextureDescriptor {
+                    format: template.format,
+                    width: template.width,
+                    height: template.height,
+                    usage: template.usage,
+                    sample_count: template.sample_count,
+                    mip_level_count: template.mip_level_count,
+                    dimension: template.dimension,
+                    depth_or_array_layers: template.depth_or_array_layers,
+                },
+                clear_color: Some(clear_color),
+            },
+        )
+    }
+
+    pub fn external_color_from_template(
+        &mut self,
+        name: &str,
+        _template: &ResourceTemplate,
+    ) -> ResourceId {
+        self.resources.register_external_resource(
+            name.to_string(),
+            ResourceType::ExternalColor {
+                clear_color: None,
+                force_store: true,
+            },
+        )
+    }
+
+    pub fn add_pass_with_slots(
+        &mut self,
+        pass: Box<dyn PassNode<C>>,
+        slots: Vec<(&str, ResourceId)>,
+    ) -> Result<NodeIndex> {
+        self.add_pass(pass, &slots)
+    }
+
+    pub fn pass(&mut self, pass: Box<dyn PassNode<C>>) -> PassBuilder<'_, C> {
+        PassBuilder {
+            graph: self,
+            pass: Some(pass),
+            slots: Vec::new(),
+        }
+    }
+
+    pub fn resource_pool(&mut self, template: &ResourceTemplate) -> ResourcePool<'_, C> {
+        ResourcePool {
+            graph: self,
+            template: template.clone(),
         }
     }
 
@@ -1451,6 +1656,11 @@ impl<C> RenderGraph<C> {
             }
 
             let node = &mut self.graph[node_index];
+
+            if !node.pass.is_enabled(configs) {
+                continue;
+            }
+
             node.pass.prepare(device, queue, configs);
         }
 
@@ -1520,6 +1730,11 @@ impl<C> RenderGraph<C> {
             }
 
             let node = &mut self.graph[node_index];
+
+            if !node.pass.is_enabled(configs) {
+                continue;
+            }
+
             let slot_mappings = self.pass_resource_mappings.get(&node.name).ok_or_else(|| {
                 RenderGraphError::ResourceNotFound {
                     resource: format!("pass_{}_mappings", node.name),
@@ -1735,4 +1950,24 @@ impl Ord for PoolHeapEntry {
 pub struct ResourceAliasingInfo {
     pub aliases: HashMap<ResourceId, usize>,
     pub pools: Vec<PoolSlot>,
+}
+
+#[macro_export]
+macro_rules! pass_slots {
+    ($($slot:ident: $resource:expr),* $(,)?) => {
+        vec![
+            $((stringify!($slot), $resource),)*
+        ]
+    };
+}
+
+#[macro_export]
+macro_rules! arc_data {
+    ($struct_name:ident { $($field:ident: $value:expr),* $(,)? }) => {
+        $struct_name {
+            $(
+                $field: std::sync::Arc::clone(&$value),
+            )*
+        }
+    };
 }

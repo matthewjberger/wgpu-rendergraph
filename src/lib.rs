@@ -1260,86 +1260,34 @@ impl Renderer {
 
         let mut graph = RenderGraph::new();
 
-        let output_resource_id = graph
-            .add_color_texture("output")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
+        let standard_template = wgpu_render_graph::ResourceTemplate::new(
+            gpu.surface_format,
+            gpu.surface_config.width,
+            gpu.surface_config.height,
+        );
 
-        let output_with_edges_resource_id = graph
-            .add_color_texture("output_with_edges")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
-
-        let output_with_brightness_contrast_resource_id = graph
-            .add_color_texture("output_with_brightness_contrast")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
-
-        let blur_horizontal_resource_id = graph
-            .add_color_texture("blur_horizontal")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
-
-        let blur_vertical_resource_id = graph
-            .add_color_texture("blur_vertical")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
-
-        let convolution_resource_id = graph
-            .add_color_texture("convolution")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
-
-        let vignette_resource_id = graph
-            .add_color_texture("vignette")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
-
-        let grayscale_resource_id = graph
-            .add_color_texture("grayscale")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
-
-        let color_invert_resource_id = graph
-            .add_color_texture("color_invert")
-            .format(gpu.surface_format)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
+        let mut pool = graph.resource_pool(&standard_template);
+        let [
+            output_resource_id,
+            output_with_edges_resource_id,
+            output_with_brightness_contrast_resource_id,
+            blur_horizontal_resource_id,
+            blur_vertical_resource_id,
+            convolution_resource_id,
+            vignette_resource_id,
+            grayscale_resource_id,
+            color_invert_resource_id,
+        ]: [wgpu_render_graph::ResourceId; 9] = pool.transient_many(&[
+            "output",
+            "output_with_edges",
+            "output_with_brightness_contrast",
+            "blur_horizontal",
+            "blur_vertical",
+            "convolution",
+            "vignette",
+            "grayscale",
+            "color_invert",
+        ]).try_into().unwrap();
 
         let viewport_display_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Viewport Display Texture"),
@@ -1423,277 +1371,225 @@ impl Renderer {
             .mip_levels(1)
             .external();
 
-        let hdr_resource_id = graph
-            .add_color_texture("hdr_buffer")
-            .format(wgpu::TextureFormat::Rgba16Float)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .clear_color(wgpu::Color {
-                r: 0.5,
-                g: 0.5,
-                b: 0.5,
-                a: 1.0,
-            })
-            .transient();
+        let hdr_template = wgpu_render_graph::ResourceTemplate::new(
+            wgpu::TextureFormat::Rgba16Float,
+            gpu.surface_config.width,
+            gpu.surface_config.height,
+        );
+        let hdr_resource_id = graph.transient_color_from_template_with_clear(
+            "hdr_buffer",
+            &hdr_template,
+            wgpu::Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
+        );
 
         let depth_resource_id = graph
             .add_depth_texture("depth")
-            .format(wgpu::TextureFormat::Depth32Float)
             .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::RENDER_ATTACHMENT)
-            .sample_count(1)
-            .mip_levels(1)
             .clear_depth(1.0)
             .external();
 
-        let compute_grayscale_resource_id = graph
-            .add_color_texture("compute_grayscale")
-            .format(wgpu::TextureFormat::Rgba8Unorm)
-            .size(gpu.surface_config.width, gpu.surface_config.height)
-            .usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING)
-            .sample_count(1)
-            .mip_levels(1)
-            .transient();
+        let compute_template = wgpu_render_graph::ResourceTemplate::new(
+            wgpu::TextureFormat::Rgba8Unorm,
+            gpu.surface_config.width,
+            gpu.surface_config.height,
+        ).usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING);
+        let compute_grayscale_resource_id = graph.transient_color_from_template("compute_grayscale", &compute_template);
 
-        graph
-            .add_pass(
-                Box::new(ScenePass::new(ScenePassData {
-                    pipeline: Arc::clone(&scene.pipeline),
-                    vertex_buffer: Arc::clone(&scene.vertex_buffer),
-                    index_buffer: Arc::clone(&scene.index_buffer),
-                    index_count: INDICES.len() as u32,
-                    uniform_bind_group: Arc::clone(&scene.uniform.bind_group),
-                    texture_bind_group: Arc::clone(&scene.texture_bind_group),
-                })),
-                &[
-                    ("color_output", hdr_resource_id),
-                    ("depth_output", depth_resource_id),
-                ],
-            )
-            .expect("Failed to add scene pass");
+        graph.pass(Box::new(ScenePass::new(ScenePassData {
+            pipeline: Arc::clone(&scene.pipeline),
+            vertex_buffer: Arc::clone(&scene.vertex_buffer),
+            index_buffer: Arc::clone(&scene.index_buffer),
+            index_count: INDICES.len() as u32,
+            uniform_bind_group: Arc::clone(&scene.uniform.bind_group),
+            texture_bind_group: Arc::clone(&scene.texture_bind_group),
+        })))
+            .write("color_output", hdr_resource_id)
+            .write("depth_output", depth_resource_id);
 
-        graph
-            .add_pass(
-                Box::new(PostProcessPass::new(PostProcessPassData {
-                    pipeline: Arc::clone(&post_process_data.pipeline),
-                    bind_group_layout: Arc::clone(&post_process_data.bind_group_layout),
-                    sampler: Arc::clone(&post_process_data.sampler),
-                })),
-                &[
-                    ("hdr_input", hdr_resource_id),
-                    ("color_output", output_resource_id),
-                ],
-            )
-            .expect("Failed to add post process pass");
+        graph.pass(Box::new(PostProcessPass::new(wgpu_render_graph::arc_data!(PostProcessPassData {
+            pipeline: post_process_data.pipeline,
+            bind_group_layout: post_process_data.bind_group_layout,
+            sampler: post_process_data.sampler,
+        }))))
+            .read("hdr_input", hdr_resource_id)
+            .write("color_output", output_resource_id);
 
-        graph
-            .add_pass(
-                Box::new(ComputeGrayscalePass::new(
-                    compute_grayscale_data,
-                    compute_grayscale_uniform_buffer,
-                )),
-                &[
-                    ("input", output_resource_id),
-                    ("output", compute_grayscale_resource_id),
-                ],
-            )
-            .expect("Failed to add compute grayscale pass");
+        graph.pass(Box::new(ComputeGrayscalePass::new(
+            compute_grayscale_data,
+            compute_grayscale_uniform_buffer,
+        )))
+            .slot("input", output_resource_id)
+            .slot("output", compute_grayscale_resource_id);
 
-        graph
-            .add_pass(
-                Box::new(EdgeDetectionPass::new(EdgeDetectionPassData {
-                    pipeline: Arc::clone(&edge_detection_data.pipeline),
-                    blit_pipeline: Arc::clone(&edge_detection_data.blit_pipeline),
-                    bind_group_layout: Arc::clone(&edge_detection_data.bind_group_layout),
-                    sampler: Arc::clone(&edge_detection_data.sampler),
-                })),
-                &[
-                    ("input", compute_grayscale_resource_id),
-                    ("output", output_with_edges_resource_id),
-                ],
-            )
-            .expect("Failed to add edge detection pass");
+        graph.add_pass_with_slots(
+            Box::new(EdgeDetectionPass::new(EdgeDetectionPassData {
+                pipeline: Arc::clone(&edge_detection_data.pipeline),
+                blit_pipeline: Arc::clone(&edge_detection_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&edge_detection_data.bind_group_layout),
+                sampler: Arc::clone(&edge_detection_data.sampler),
+            })),
+            wgpu_render_graph::pass_slots! {
+                input: compute_grayscale_resource_id,
+                output: output_with_edges_resource_id,
+            },
+        ).expect("Failed to add edge detection pass");
 
-        graph
-            .add_pass(
-                Box::new(BrightnessContrastPass::new(
-                    BrightnessContrastPassData {
-                        pipeline: Arc::clone(&brightness_contrast_data.pipeline),
-                        blit_pipeline: Arc::clone(&brightness_contrast_data.blit_pipeline),
-                        bind_group_layout: Arc::clone(&brightness_contrast_data.bind_group_layout),
-                        sampler: Arc::clone(&brightness_contrast_data.sampler),
-                    },
-                    brightness_contrast_uniform_buffer,
-                )),
-                &[
-                    ("input", output_with_edges_resource_id),
-                    ("output", output_with_brightness_contrast_resource_id),
-                ],
-            )
-            .expect("Failed to add brightness contrast pass");
+        graph.add_pass_with_slots(
+            Box::new(BrightnessContrastPass::new(
+                BrightnessContrastPassData {
+                    pipeline: Arc::clone(&brightness_contrast_data.pipeline),
+                    blit_pipeline: Arc::clone(&brightness_contrast_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&brightness_contrast_data.bind_group_layout),
+                    sampler: Arc::clone(&brightness_contrast_data.sampler),
+                },
+                brightness_contrast_uniform_buffer,
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: output_with_edges_resource_id,
+                output: output_with_brightness_contrast_resource_id,
+            },
+        ).expect("Failed to add brightness contrast pass");
 
-        graph
-            .add_pass(
-                Box::new(GaussianBlurHorizontalPass::new(
-                    GaussianBlurPassData {
-                        pipeline: Arc::clone(&gaussian_blur_data.pipeline),
-                        blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
-                        bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
-                        sampler: Arc::clone(&gaussian_blur_data.sampler),
-                    },
-                    gaussian_blur_horizontal_uniform_buffer,
-                )),
-                &[
-                    ("input", output_with_brightness_contrast_resource_id),
-                    ("output", blur_horizontal_resource_id),
-                ],
-            )
-            .expect("Failed to add gaussian blur horizontal pass");
+        graph.add_pass_with_slots(
+            Box::new(GaussianBlurHorizontalPass::new(
+                GaussianBlurPassData {
+                    pipeline: Arc::clone(&gaussian_blur_data.pipeline),
+                    blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
+                    sampler: Arc::clone(&gaussian_blur_data.sampler),
+                },
+                gaussian_blur_horizontal_uniform_buffer,
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: output_with_brightness_contrast_resource_id,
+                output: blur_horizontal_resource_id,
+            },
+        ).expect("Failed to add gaussian blur horizontal pass");
 
-        graph
-            .add_pass(
-                Box::new(GaussianBlurVerticalPass::new(
-                    GaussianBlurPassData {
-                        pipeline: Arc::clone(&gaussian_blur_data.pipeline),
-                        blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
-                        bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
-                        sampler: Arc::clone(&gaussian_blur_data.sampler),
-                    },
-                    gaussian_blur_vertical_uniform_buffer,
-                )),
-                &[
-                    ("input", blur_horizontal_resource_id),
-                    ("output", blur_vertical_resource_id),
-                ],
-            )
-            .expect("Failed to add gaussian blur vertical pass");
+        graph.add_pass_with_slots(
+            Box::new(GaussianBlurVerticalPass::new(
+                GaussianBlurPassData {
+                    pipeline: Arc::clone(&gaussian_blur_data.pipeline),
+                    blit_pipeline: Arc::clone(&gaussian_blur_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&gaussian_blur_data.bind_group_layout),
+                    sampler: Arc::clone(&gaussian_blur_data.sampler),
+                },
+                gaussian_blur_vertical_uniform_buffer,
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: blur_horizontal_resource_id,
+                output: blur_vertical_resource_id,
+            },
+        ).expect("Failed to add gaussian blur vertical pass");
 
-        graph
-            .add_pass(
-                Box::new(SharpenPass::new(
-                    SharpenPassData {
-                        pipeline: Arc::clone(&sharpen_data.pipeline),
-                        blit_pipeline: Arc::clone(&sharpen_data.blit_pipeline),
-                        bind_group_layout: Arc::clone(&sharpen_data.bind_group_layout),
-                        sampler: Arc::clone(&sharpen_data.sampler),
-                    },
-                    Arc::clone(&sharpen_uniform_buffer),
-                )),
-                &[
-                    ("input", blur_vertical_resource_id),
-                    ("output", sharpen_resource_id),
-                ],
-            )
-            .expect("Failed to add sharpen pass");
+        graph.add_pass_with_slots(
+            Box::new(SharpenPass::new(
+                SharpenPassData {
+                    pipeline: Arc::clone(&sharpen_data.pipeline),
+                    blit_pipeline: Arc::clone(&sharpen_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&sharpen_data.bind_group_layout),
+                    sampler: Arc::clone(&sharpen_data.sampler),
+                },
+                Arc::clone(&sharpen_uniform_buffer),
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: blur_vertical_resource_id,
+                output: sharpen_resource_id,
+            },
+        ).expect("Failed to add sharpen pass");
 
-        graph
-            .add_pass(
-                Box::new(ConvolutionPass::new(
-                    ConvolutionPassData {
-                        pipeline: Arc::clone(&convolution_data.pipeline),
-                        blit_pipeline: Arc::clone(&convolution_data.blit_pipeline),
-                        bind_group_layout: Arc::clone(&convolution_data.bind_group_layout),
-                        sampler: Arc::clone(&convolution_data.sampler),
-                    },
-                    convolution_kernel_buffer,
-                )),
-                &[
-                    ("input", sharpen_resource_id),
-                    ("output", convolution_resource_id),
-                ],
-            )
-            .expect("Failed to add convolution pass");
+        graph.add_pass_with_slots(
+            Box::new(ConvolutionPass::new(
+                ConvolutionPassData {
+                    pipeline: Arc::clone(&convolution_data.pipeline),
+                    blit_pipeline: Arc::clone(&convolution_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&convolution_data.bind_group_layout),
+                    sampler: Arc::clone(&convolution_data.sampler),
+                },
+                convolution_kernel_buffer,
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: sharpen_resource_id,
+                output: convolution_resource_id,
+            },
+        ).expect("Failed to add convolution pass");
 
-        graph
-            .add_pass(
-                Box::new(VignettePass::new(
-                    VignettePassData {
-                        pipeline: Arc::clone(&vignette_data.pipeline),
-                        blit_pipeline: Arc::clone(&vignette_data.blit_pipeline),
-                        bind_group_layout: Arc::clone(&vignette_data.bind_group_layout),
-                        sampler: Arc::clone(&vignette_data.sampler),
-                    },
-                    vignette_uniform_buffer,
-                )),
-                &[
-                    ("input", convolution_resource_id),
-                    ("output", vignette_resource_id),
-                ],
-            )
-            .expect("Failed to add vignette pass");
+        graph.add_pass_with_slots(
+            Box::new(VignettePass::new(
+                VignettePassData {
+                    pipeline: Arc::clone(&vignette_data.pipeline),
+                    blit_pipeline: Arc::clone(&vignette_data.blit_pipeline),
+                    bind_group_layout: Arc::clone(&vignette_data.bind_group_layout),
+                    sampler: Arc::clone(&vignette_data.sampler),
+                },
+                vignette_uniform_buffer,
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: convolution_resource_id,
+                output: vignette_resource_id,
+            },
+        ).expect("Failed to add vignette pass");
 
-        graph
-            .add_pass(
-                Box::new(GrayscalePass::new(GrayscalePassData {
-                    pipeline: Arc::clone(&grayscale_data.pipeline),
-                    blit_pipeline: Arc::clone(&grayscale_data.blit_pipeline),
-                    bind_group_layout: Arc::clone(&grayscale_data.bind_group_layout),
-                    sampler: Arc::clone(&grayscale_data.sampler),
-                })),
-                &[
-                    ("input", vignette_resource_id),
-                    ("output", grayscale_resource_id),
-                ],
-            )
-            .expect("Failed to add grayscale pass");
+        graph.add_pass_with_slots(
+            Box::new(GrayscalePass::new(GrayscalePassData {
+                pipeline: Arc::clone(&grayscale_data.pipeline),
+                blit_pipeline: Arc::clone(&grayscale_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&grayscale_data.bind_group_layout),
+                sampler: Arc::clone(&grayscale_data.sampler),
+            })),
+            wgpu_render_graph::pass_slots! {
+                input: vignette_resource_id,
+                output: grayscale_resource_id,
+            },
+        ).expect("Failed to add grayscale pass");
 
-        graph
-            .add_pass(
-                Box::new(ColorInvertPass::new(ColorInvertPassData {
-                    pipeline: Arc::clone(&color_invert_data.pipeline),
-                    blit_pipeline: Arc::clone(&color_invert_data.blit_pipeline),
-                    bind_group_layout: Arc::clone(&color_invert_data.bind_group_layout),
-                    sampler: Arc::clone(&color_invert_data.sampler),
-                })),
-                &[
-                    ("input", grayscale_resource_id),
-                    ("output", color_invert_resource_id),
-                ],
-            )
-            .expect("Failed to add color invert pass");
+        graph.add_pass_with_slots(
+            Box::new(ColorInvertPass::new(ColorInvertPassData {
+                pipeline: Arc::clone(&color_invert_data.pipeline),
+                blit_pipeline: Arc::clone(&color_invert_data.blit_pipeline),
+                bind_group_layout: Arc::clone(&color_invert_data.bind_group_layout),
+                sampler: Arc::clone(&color_invert_data.sampler),
+            })),
+            wgpu_render_graph::pass_slots! {
+                input: grayscale_resource_id,
+                output: color_invert_resource_id,
+            },
+        ).expect("Failed to add color invert pass");
 
-        graph
-            .add_pass(
-                Box::new(BlitPass::new(
-                    BlitPassData {
-                        pipeline: Arc::clone(&blit_data.pipeline),
-                        bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
-                        sampler: Arc::clone(&blit_data.sampler),
-                    },
-                    "blit_to_viewport_display".to_string(),
-                )),
-                &[
-                    ("input", color_invert_resource_id),
-                    ("output", viewport_display_resource_id),
-                ],
-            )
-            .expect("Failed to add blit to viewport pass");
+        graph.add_pass_with_slots(
+            Box::new(BlitPass::new(
+                BlitPassData {
+                    pipeline: Arc::clone(&blit_data.pipeline),
+                    bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
+                    sampler: Arc::clone(&blit_data.sampler),
+                },
+                "blit_to_viewport_display".to_string(),
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: color_invert_resource_id,
+                output: viewport_display_resource_id,
+            },
+        ).expect("Failed to add blit to viewport pass");
 
-        graph
-            .add_pass(
-                Box::new(EguiPass::new()),
-                &[("color_target", egui_output_resource_id)],
-            )
-            .expect("Failed to add egui pass");
+        graph.add_pass_with_slots(
+            Box::new(EguiPass::new()),
+            wgpu_render_graph::pass_slots! { color_target: egui_output_resource_id },
+        ).expect("Failed to add egui pass");
 
-        graph
-            .add_pass(
-                Box::new(BlitPass::new(
-                    BlitPassData {
-                        pipeline: Arc::clone(&blit_data.pipeline),
-                        bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
-                        sampler: Arc::clone(&blit_data.sampler),
-                    },
-                    "blit_to_surface".to_string(),
-                )),
-                &[
-                    ("input", egui_output_resource_id),
-                    ("output", surface_resource_id),
-                ],
-            )
-            .expect("Failed to add blit to surface pass");
+        graph.add_pass_with_slots(
+            Box::new(BlitPass::new(
+                BlitPassData {
+                    pipeline: Arc::clone(&blit_data.pipeline),
+                    bind_group_layout: Arc::clone(&blit_data.bind_group_layout),
+                    sampler: Arc::clone(&blit_data.sampler),
+                },
+                "blit_to_surface".to_string(),
+            )),
+            wgpu_render_graph::pass_slots! {
+                input: egui_output_resource_id,
+                output: surface_resource_id,
+            },
+        ).expect("Failed to add blit to surface pass");
 
         graph.compile().expect("Failed to compile render graph");
 
